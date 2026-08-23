@@ -33,7 +33,11 @@ def get_format_sizes(url: str, cid=None) -> dict:
         'skip_download': True,
         'js_runtimes': {'node': {}},
     }
-    if cf: opts['cookiefile'] = cf
+    if cf:
+        opts['cookiefile'] = cf
+    else:
+        opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+        opts['nocheckcertificate'] = True
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -347,6 +351,9 @@ def fetch_playlist_entries(url: str, cf=None) -> tuple:
         'js_runtimes': {'node': {}},
     }
     if cf: opts['cookiefile'] = cf
+    else:
+        opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+        opts['nocheckcertificate'] = True
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return list(info.get('entries', [])), info.get('title', 'playlist')
@@ -450,6 +457,9 @@ def process_playlist_download(task):
         if embed_chap and not audio_only:
             ydl_opts['embedchapters'] = True
         if cf: ydl_opts['cookiefile'] = cf
+        else:
+            ydl_opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+            ydl_opts['nocheckcertificate'] = True
 
         fp = None
         try:
