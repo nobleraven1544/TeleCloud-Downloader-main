@@ -113,13 +113,12 @@ def _upload_large(token: str, repo: str, path: str, fname: str,
     is_empty = (r_probe.status_code == 409
                 or (r_probe.status_code == 200 and r_probe.json() == []))
     if is_empty:
+        # Empty repo: Git Data API refuses blobs (409). Seed the repo with a
+        # tiny README via Contents API, then continue with the Git Data flow.
         from github import Github
         repository = Github(token).get_repo(repo)
-        with open(file_path, "rb") as f:
-            data = f.read()
-        reporter.add(len(data))
-        repository.create_file(path, f"upload {fname}", data)
-        return
+        repository.create_file("README.md", "init", "# uploads\n")
+        reporter.add(0)  # keep progress at 0 for the real file
 
     # Stream the file as a single multipart-style PUT via chunked generator so
     # progress updates flow while the request body is being sent.
