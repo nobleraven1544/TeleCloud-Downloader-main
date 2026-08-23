@@ -622,6 +622,16 @@ def handle_text(message):
             bot.send_message(cid, t(cid, 'cookie_invalid_format'))
         return
 
+    if state == 'await_github_token':
+        from callbacks import _handle_github_token_text
+        if _handle_github_token_text(cid, text):
+            return
+
+    if state == 'await_github_repo':
+        from callbacks import _handle_github_repo_text
+        if _handle_github_repo_text(cid, text):
+            return
+
     if isinstance(state, str) and state.startswith('await_playlist_count|'):
         _handle_playlist_count(cid, text, state)
         return

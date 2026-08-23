@@ -42,6 +42,20 @@ def main_menu_markup(cid=None):
 #   Row 3: [Subtitle]   [Chapters]
 #   Row 4: [Cookie Manager — full width]
 # =============================================================
+def _github_button_label(cid) -> str:
+    try:
+        import db
+        tok = db.get_github_token(cid)
+        repo = db.get_github_repo(cid)
+        if tok and repo:
+            return f"✅ GitHub: {repo}"
+        if tok:
+            return "✅ GitHub وصل شده"
+    except Exception:
+        pass
+    return "🐱 اتصال GitHub"
+
+
 def settings_inline_markup(cid=None):
     import config
     from dest_helpers import (
@@ -120,6 +134,8 @@ def settings_inline_markup(cid=None):
     mk.add(types.InlineKeyboardButton(cookie_label, callback_data="set|cookie"))
     # Row 5: Google Drive connection (full width, status-aware)
     mk.add(types.InlineKeyboardButton(_gdrive_button_label(cid), callback_data="set|gdrive"))
+    # Row 6: GitHub connection (full width, status-aware)
+    mk.add(types.InlineKeyboardButton(_github_button_label(cid), callback_data="set|github"))
 
     return mk
 

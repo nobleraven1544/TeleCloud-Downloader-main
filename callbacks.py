@@ -236,6 +236,31 @@ def callback_query(call):
             _handle_gdrive_settings(call, cid)
             return
 
+        elif action == "github":
+            # Open the GitHub setup / status panel as a new message
+            bot.answer_callback_query(call.id)
+            _handle_github_settings(call, cid)
+            return
+
+        elif action == "ghdel":
+            # Disconnect GitHub: clear stored token+repo
+            db.set_github_token(cid, "")
+            db.set_github_repo(cid, "")
+            bot.answer_callback_query(call.id, "GitHub قطع شد")
+            try:
+                bot.edit_message_text(
+                    "🔌 اتصال GitHub حذف شد.",
+                    cid, call.message.message_id,
+                )
+            except Exception:
+                pass
+            from menu import settings_inline_markup as _sim
+            try:
+                bot.send_message(cid, "تنظیمات:", reply_markup=_sim(cid))
+            except Exception:
+                pass
+            return
+
         elif action == "profile":
             # Show the user's daily quota stats (helper lives in handlers.py)
             bot.answer_callback_query(call.id)
@@ -1554,3 +1579,113 @@ def _handle_gdrive_callback(call, cid: int, data: str) -> None:
 
 # (Profile stats helper lives in handlers.py to avoid circular imports;
 #  callbacks.py imports it lazily inside the set|profile branch above.)
+
+
+def _handle_github_settings(call, cid: int) -> None:
+    """
+    Show either the connect instructions (ask for token) or a connected panel.
+    Mirrors the Google Drive settings UX.
+    """
+    import types as _types
+    from telebot import types
+    token = None
+    repo = None
+    try:
+        token = db.get_github_token(cid)
+        repo = db.get_github_repo(cid)
+    except Exception:
+        pass
+
+    if token and repo:
+        mk = types.InlineKeyboardMarkup()
+        mk.add(types.InlineKeyboardButton(
+            "🔌 قطع اتصال GitHub", callback_data="set|ghdel"))
+        bot.send_message(
+            cid,
+            f"<b>🐙 GitHub متصل است</b>\n"
+            f"ریپو: <code>{repo}</code>\n\n"
+            "فایل‌های آپلودی به این ریپو می‌روند و لینک مستقیم می‌گیری.",
+            parse_mode="HTML",
+            reply_markup=mk,
+        )
+        return
+
+    # Not connected → ask for the token via state machine
+    user_state[cid] = "await_github_token"
+    bot.send_message(
+        cid,
+        "<b>🐙 اتصال GitHub</b>\n\n"
+        "۱) یک <b>Personal Access Token</b> بساز:\n"
+        "github.com/settings/tokens → Generate new token (classic)\n"
+        "فقط دسترسی <code>repo</code> کافی است.\n\n"
+        "۲) توکن را همین‌جا بفرست (پیوات بماند):\n"
+        "<code>ghp_xxxxxxxxxxxx</code>\n\n"
+        "ربات خودش یک ریپوی private به اسم <code>telecloud-uploads</code> برایت می‌سازد.\n\n"
+        "برای لغو، /cancel بزن.",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+def _handle_github_token_text(cid: int, text: str) -> bool:
+    """Consume 'await_github_token' state; returns True if handled."""
+    token = text.strip()
+    if not re.fullmatch(r"(ghp|github_pat|gho|ghu|ghs)_[A-Za-z0-9_]+", token):
+        bot.send_message(
+            cid,
+            "❌ فرمت توکن معتبر نیست. توکن با ghp_ یا github_pat_ شروع می‌شود.\n"
+            "دوباره بفرست یا /cancel بزن.")
+        return True
+
+    import requests as _rq
+    try:
+        login_r = _rq.get("https://api.github.com/user",
+                          headers={"Authorization": f"token {token}"},
+                          timeout=20).json()
+        login = login_r.get("login", "")
+        if not login:
+            bot.send_message(cid, "❌ توکن معتبر نیست. دوباره امتحان کن یا /cancel بزن.")
+            return True
+
+        r = _rq.post("https://api.github.com/user/repos",
+                     json={"name": "telecloud-uploads", "private": True,
+                           "description": "TeleCloud-Downloader uploads"},
+                     headers={"Authorization": f"token {token}",
+                              "Accept": "application/vnd.github+json"},
+                     timeout=20)
+        if r.status_code == 201 or (r.status_code == 422):
+            repo = f"{login}/telecloud-uploads"
+        else:
+            bot.send_message(
+                cid,
+                "❌ اجازهٔ ساخت ریپو نداد. دسترسی repo را چک کن یا اگر ریپو داری "
+                "اسمش را بفرست (owner/repo):")
+            user_state[cid] = "await_github_repo"
+            db.set_github_token(cid, token)
+            return True
+
+        db.set_github_token(cid, token)
+        db.set_github_repo(cid, repo)
+        user_state[cid] = None
+        bot.send_message(
+            cid,
+            f"✅ GitHub وصل شد!\nریپو: <code>{repo}</code>\n"
+            "حالا در تنظیمات، مقصد آپلود را روی 🐙 GitHub بگذار.",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        bot.send_message(cid, f"❌ خطا در اتصال به GitHub: {e}")
+        return True
+
+
+def _handle_github_repo_text(cid: int, text: str) -> bool:
+    """Consume 'await_github_repo' state; returns True if handled."""
+    repo = text.strip().lstrip("@")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        bot.send_message(cid, "❌ فرمت درست: owner/repo — دوباره بفرست یا /cancel.")
+        return True
+    db.set_github_repo(cid, repo)
+    user_state[cid] = None
+    bot.send_message(cid, f"✅ ریپو ست شد: <code>{repo}</code>", parse_mode="HTML")
+    return True
+
