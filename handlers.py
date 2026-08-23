@@ -442,9 +442,14 @@ def handle_incoming_files(message):
             data = bot.download_file(file_path)
             with open(fp, 'wb') as f:
                 f.write(data)
-        upload_file_to_gdrive_folder(
-            fp, status_msg, "FilesFromTel",
-            user_id=message.from_user.id,
+        # Route through smart_dest so the user's saved destination
+        # (github / s3 / gd) is honored instead of always using Drive.
+        from uploaders.smart_dest import smart_dest
+        smart_dest(
+            fp, status_msg, None,
+            folder_name="FilesFromTel",
+            task_info={'user_id': message.from_user.id,
+                       'source': 'Telegram file'},
         )
 
     except Exception as e:
