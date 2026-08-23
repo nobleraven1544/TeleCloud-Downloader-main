@@ -20,8 +20,8 @@ import db
 GITHUB_DEFAULT_REPO = os.environ.get('GITHUB_DEFAULT_REPO', '')  # owner/repo fallback
 
 API = "https://api.github.com"
-CONTENTS_API_MAX = 35 * 1024 * 1024   # single-file limit (raw blob) — safe margin
-CHUNK_SIZE = 35 * 1024 * 1024         # part size for split uploads
+CONTENTS_API_MAX = 20 * 1024 * 1024   # single-file limit (base64 blob) — safe margin
+CHUNK_SIZE = 20 * 1024 * 1024         # part size for split uploads
 
 
 def _hdrs(token: str) -> dict:
@@ -77,9 +77,10 @@ class ProgressReporter:
 
 
 def _create_blob_raw(token: str, repo: str, data: bytes) -> dict:
-    """Create a blob using raw encoding (works up to ~39MB)."""
+    """Create a blob using base64 encoding (safe up to ~25MB raw)."""
     r = requests.post(f"{API}/repos/{repo}/git/blobs",
-                      json={"content": data.decode('latin-1'), "encoding": "raw"},
+                      json={"content": base64.b64encode(data).decode(),
+                            "encoding": "base64"},
                       headers=_hdrs(token), timeout=300)
     r.raise_for_status()
     return r.json()
