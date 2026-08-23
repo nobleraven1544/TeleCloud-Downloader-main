@@ -172,19 +172,37 @@ def callback_query(call):
             toast = t(cid, 'mode_set_toast')
 
         elif action == "upload":
-            if cid in config.tg_upload_mode:
-                # TG → GD
+            # Cycle saved destination: ask → tg → gd → s3 → github → ask
+            import db as _db
+            try:
+                cur = _db.get_upload_dest(cid)
+            except Exception:
+                cur = None
+            if cur is None and cid in config.tg_upload_mode:
+                cur = 'tg'
+            elif cur is None and cid in config.gd_upload_mode:
+                cur = 'gd'
+
+            order = [None, 'tg', 'gd', 's3', 'github']
+            idx = order.index(cur) if cur in order else 0
+            nxt = order[(idx + 1) % len(order)]
+
+            if nxt is None:
                 config.tg_upload_mode.discard(cid)
-                config.gd_upload_mode.add(cid)
-                toast = t(cid, 'dest_gdrive_toast')
-            elif cid in config.gd_upload_mode:
-                # GD → Ask (remove from both sets)
                 config.gd_upload_mode.discard(cid)
-                toast = t(cid, 'upload_ask_toast')
+                toast = 'مقصد آپلود: بپرس (برای هر فایل)'
             else:
-                # Ask → TG
-                config.tg_upload_mode.add(cid)
-                toast = t(cid, 'dest_tg_toast')
+                if nxt != 'tg':
+                    config.tg_upload_mode.discard(cid)
+                if nxt != 'gd':
+                    config.gd_upload_mode.discard(cid)
+                _db.set_upload_dest(cid, nxt)
+                toast = {
+                    'tg': '📤 مقصد آپلود: تلگرام',
+                    'gd': '☁️ مقصد آپلود: Google Drive',
+                    's3': '🗄 مقصد آپلود: Railway S3',
+                    'github': '🐙 مقصد آپلود: GitHub',
+                }[nxt]
 
         elif action == "qual":
             # Context-aware: audio mode → audio quality, video mode → video quality

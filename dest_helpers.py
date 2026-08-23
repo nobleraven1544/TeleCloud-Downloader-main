@@ -76,7 +76,14 @@ _SUBTITLE_LOCALE = {
 # =============================================================
 
 def get_dest(cid) -> str:
-    """Return the user's default upload destination."""
+    """Return the user's default upload destination (db-saved, then runtime sets)."""
+    import db as _db
+    try:
+        d = _db.get_upload_dest(cid)
+        if d in ('tg', 'gd', 's3', 'github'):
+            return d
+    except Exception:
+        pass
     if cid in config.tg_upload_mode:
         return 'tg'
     if cid in config.gd_upload_mode:
