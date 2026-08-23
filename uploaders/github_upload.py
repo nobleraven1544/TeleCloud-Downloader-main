@@ -11,8 +11,9 @@ import os
 import base64
 import json
 import requests
-from config import GITHUB_DEFAULT_REPO
 import db
+
+GITHUB_DEFAULT_REPO = os.environ.get('GITHUB_DEFAULT_REPO', '')  # owner/repo fallback
 
 API = "https://api.github.com"
 CONTENTS_API_MAX = 45 * 1024 * 1024  # stay under GitHub's ~50MB contents limit
