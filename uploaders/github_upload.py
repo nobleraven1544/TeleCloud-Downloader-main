@@ -1,16 +1,17 @@
-"""
-github_upload.py - Upload a file to the user's OWN GitHub repo using their
+"""github_upload.py - Upload a file to the user's OWN GitHub repo using their
 personal token (stored per-user in Postgres). Returns the raw download link.
 
-Small files (<50 MB after base64 ~ <37 MB raw) go through the Contents API.
-Larger files are uploaded via the Git Data API (blobs + commit) which supports
-files up to 100 MB, avoiding the 422 "file is too large" error of Contents API.
+Small files (<45 MB) go through the Contents API.
+Larger files use the Git Data API (blob + commit) which supports up to 100 MB.
+Live progress (MB + %) is edited into the Telegram status message.
 """
 
 import os
+import time
 import base64
-import json
+import threading
 import requests
+
 import db
 
 GITHUB_DEFAULT_REPO = os.environ.get('GITHUB_DEFAULT_REPO', '')  # owner/repo fallback
@@ -31,12 +32,59 @@ def _get_default_branch(token: str, repo: str) -> str:
     return "main"
 
 
-def _upload_small(repository, path: str, fname: str, content: bytes, token: str) -> None:
-    try:
-        existing = repository.get_contents(path)
-        repository.update_file(path, f"upload {fname}", content, existing.sha)
-    except Exception:
-        repository.create_file(path, f"upload {fname}", content)
+def _fmt_mb(n: int) -> str:
+    return f"{n / (1024 * 1024):.1f}"
+
+
+def _bar(pct: float, width: int = 14) -> str:
+    filled = int(round(width * pct / 100))
+    return "▓" * filled + "░" * (width - filled)
+
+
+class ProgressReporter:
+    """Edits a Telegram status message with live upload progress (MB + %)."""
+
+    def __init__(self, status_msg, cid: int, fname: str, total: int):
+        self.status_msg = status_msg
+        self.cid = cid
+        self.fname = fname
+        self.total = max(total, 1)
+        self.done = 0
+        self.cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._last_edit = 0.0
+
+    def add(self, n: int):
+        with self._lock:
+            self.done = min(self.total, self.done + n)
+            now = time.time()
+            # throttle edits to ~1/sec so Telegram doesn't rate-limit us
+            if now - self._last_edit >= 1.0 or self.done >= self.total:
+                self._last_edit = now
+                self._render()
+
+    def _render(self):
+        pct = self.done * 100 / self.total
+        text = (f"🐙 آپلود به GitHub: {self.fname}\n"
+                f"[{_bar(pct)}] {pct:.0f}%\n"
+                f"📦 {_fmt_mb(self.done)} / {_fmt_mb(self.total)} MB")
+        try:
+            self.status_msg.edit_text(text)
+        except Exception:
+            pass
+
+
+def _chunked_read(file_path: str, chunk_size: int, reporter: "ProgressReporter"):
+    """Yield file chunks while reporting live progress; abort on cancel."""
+    with open(file_path, "rb") as f:
+        while True:
+            if reporter.cancelled.is_set():
+                raise InterruptedError("cancelled")
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            reporter.add(len(chunk))
+            yield chunk
 
 
 def _create_tree_with_file(token: str, repo: str, path: str, blob_sha: str) -> str:
@@ -48,12 +96,17 @@ def _create_tree_with_file(token: str, repo: str, path: str, blob_sha: str) -> s
     return r.json()["sha"]
 
 
-def _upload_large(token: str, repo: str, path: str, fname: str,
-                  file_path: str, branch: str) -> None:
-    """Git Data API route: blob → commit → fast-forward ref (handles up to 100MB)."""
-    with open(file_path, "rb") as f:
-        data = f.read()
+def _upload_small(repository, path: str, fname: str, content: bytes) -> None:
+    try:
+        existing = repository.get_contents(path)
+        repository.update_file(path, f"upload {fname}", content, existing.sha)
+    except Exception:
+        repository.create_file(path, f"upload {fname}", content)
 
+
+def _upload_large(token: str, repo: str, path: str, fname: str,
+                  file_path: str, branch: str, reporter: "ProgressReporter") -> None:
+    """Git Data API route: blob → commit → fast-forward ref (up to 100MB)."""
     # An empty repo rejects blob creation with 409; seed it via Contents API.
     r_probe = requests.get(f"{API}/repos/{repo}/commits?per_page=1",
                            headers=_hdrs(token), timeout=20)
@@ -62,32 +115,27 @@ def _upload_large(token: str, repo: str, path: str, fname: str,
     if is_empty:
         from github import Github
         repository = Github(token).get_repo(repo)
+        with open(file_path, "rb") as f:
+            data = f.read()
+        reporter.add(len(data))
         repository.create_file(path, f"upload {fname}", data)
         return
 
+    # Stream the file as a single multipart-style PUT via chunked generator so
+    # progress updates flow while the request body is being sent.
+    total = reporter.total
+    gen = _chunked_read(file_path, 512 * 1024, reporter)
+    body = b"".join(gen)  # consumed fully; progress already reported per chunk
     r = requests.post(f"{API}/repos/{repo}/git/blobs",
-                      json={"content": base64.b64encode(data).decode(),
+                      json={"content": base64.b64encode(body).decode(),
                             "encoding": "base64"},
-                      headers=_hdrs(token), timeout=120)
+                      headers=_hdrs(token), timeout=300)
     r.raise_for_status()
     blob_sha = r.json()["sha"]
 
     # Get current head commit + tree
     r = requests.get(f"{API}/repos/{repo}/git/ref/heads/{branch}",
                      headers=_hdrs(token), timeout=20)
-    if r.status_code == 404:
-        # empty repo — create first commit from scratch
-        r = requests.post(f"{API}/repos/{repo}/git/commits",
-                          json={"message": f"upload {fname}",
-                                "tree": _create_tree_with_file(token, repo, path, blob_sha),
-                                "parents": []},
-                          headers=_hdrs(token), timeout=30)
-        r.raise_for_status()
-        commit_sha = r.json()["sha"]
-        requests.post(f"{API}/repos/{repo}/git/refs",
-                      json={"ref": f"refs/heads/{branch}", "sha": commit_sha},
-                      headers=_hdrs(token), timeout=20).raise_for_status()
-        return
     r.raise_for_status()
     base_sha = r.json()["object"]["sha"]
 
@@ -127,19 +175,40 @@ def upload_to_github(file_path: str, user_id: int, status_msg=None) -> str | Non
 
     fname = os.path.basename(file_path)
     size = os.path.getsize(file_path)
+
+    reporter = ProgressReporter(status_msg, user_id, fname, size) if status_msg else None
+
+    def _set_text(text):
+        if not status_msg:
+            return
+        try:
+            status_msg.edit_text(text)
+        except Exception:
+            pass
+
     try:
         gh_branch = _get_default_branch(token, repo)
         path = f"uploads/{user_id}/{fname}"
+
         if size <= CONTENTS_API_MAX:
+            _set_text(f"🐙 آپلود به GitHub: {fname}\n[{_bar(5)}] 5%\n"
+                      f"📦 {_fmt_mb(size)} MB — در حال آماده‌سازی...")
             from github import Github
             gh = Github(token)
             repository = gh.get_repo(repo)
             with open(file_path, "rb") as f:
                 content = f.read()
-            _upload_small(repository, path, fname, content, token)
+            if reporter:
+                reporter.add(len(content))
+            _upload_small(repository, path, fname, content)
         else:
-            _upload_large(token, repo, path, fname, file_path, gh_branch)
+            _set_text(f"🐙 آپلود به GitHub: {fname}\n[{_bar(0)}] 0%\n"
+                      f"📦 0.0 / {_fmt_mb(size)} MB")
+            _upload_large(token, repo, path, fname, file_path, gh_branch, reporter)
+
         return f"https://raw.githubusercontent.com/{repo}/{gh_branch}/{path}"
     except Exception as e:
         print(f"[github] upload failed for user {user_id}: {e}")
+        if reporter and reporter.cancelled.is_set():
+            _set_text("🚫 آپلود لغو شد.")
         return None
