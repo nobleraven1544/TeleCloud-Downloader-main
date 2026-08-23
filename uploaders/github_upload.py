@@ -166,8 +166,11 @@ def upload_to_github(file_path: str, user_id: int, status_msg=None) -> str | Non
                          f"upload {fname}")
             if reporter:
                 reporter.add(len(data))
-            return (f"https://raw.githubusercontent.com/{repo}/{gh_branch}/"
-                    f"uploads/{user_id}/{fname}")
+            return (f"🔗 لینک فایل (ریپوی private):\n"
+                    f"https://github.com/{repo}/blob/{gh_branch}/"
+                    f"uploads/{user_id}/{fname}\n\n"
+                    "🔒 این ریپو خصوصی است — برای دانلود باید با اکانت گیت‌هاب "
+                    "خودت (همونی که توکنش رو دادی) لاگین باشی.")
 
         # Large file → split into parts, upload each as its own blob
         n_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -194,8 +197,16 @@ def upload_to_github(file_path: str, user_id: int, status_msg=None) -> str | Non
                         "sha": mblob["sha"]})
 
         _commit_tree(token, repo, gh_branch, entries, f"upload {fname} ({n_parts} parts)")
-        return (f"https://raw.githubusercontent.com/{repo}/{gh_branch}/"
-                f"uploads/{user_id}/{fname}.part001")
+        links = "\n".join(
+            f"part{i+1:03d}: https://github.com/{repo}/blob/{gh_branch}/"
+            f"uploads/{user_id}/{fname}.part{i+1:03d}"
+            for i in range(len(entries) - 1))
+        return (f"🔗 لینک بخش‌های فایل (ریپوی private):\n{links}\n\n"
+                f"📋 manifest:\nhttps://github.com/{repo}/blob/{gh_branch}/"
+                f"uploads/{user_id}/{fname}.manifest.json\n\n"
+                "🔒 ریپو خصوصی است — برای دانلود با اکانت گیت‌هاب خودت "
+                "(همونی که توکنش رو دادی) لاگین باش.\n"
+                "🧩 برای ساخت دوبارهٔ فایل اصلی، همهٔ part ها را به ترتیب به هم بچسبان.")
     except Exception as e:
         print(f"[github] upload failed for user {user_id}: {e}")
         return None
