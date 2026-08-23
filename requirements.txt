@@ -1,0 +1,4 @@
+pyTelegramBotAPI==4.33.0
+yt-dlp[default]==2026.3.17
+requests==2.34.2
+mutagen==1.47.0

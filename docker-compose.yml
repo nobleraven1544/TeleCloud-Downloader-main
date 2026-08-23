@@ -1,0 +1,30 @@
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./telegram-bot-api-data:/var/lib/telegram-bot-api
+      - ./downloads:/root/downloads
+
+  telegram-bot:
+    build: .
+    container_name: telegram-bot
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/root/downloads
+      - ./cookies:/root/cookies
+      - ./cookies_enabled.json:/root/cookies_enabled.json
+      - ./rclone:/root/.config/rclone
+      - ./user_configs:/app/user_configs
+      - .:/app
+      # ── Share the local Bot API file store so the bot can read files
+      # at their absolute paths (e.g. /var/lib/telegram-bot-api/...)
+      # returned by bot.get_file() when using the local API server.
+      - ./telegram-bot-api-data:/var/lib/telegram-bot-api:ro
