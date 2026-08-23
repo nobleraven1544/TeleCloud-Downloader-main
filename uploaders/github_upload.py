@@ -54,6 +54,17 @@ def _upload_large(token: str, repo: str, path: str, fname: str,
     with open(file_path, "rb") as f:
         data = f.read()
 
+    # An empty repo rejects blob creation with 409; seed it via Contents API.
+    r_probe = requests.get(f"{API}/repos/{repo}/commits?per_page=1",
+                           headers=_hdrs(token), timeout=20)
+    is_empty = (r_probe.status_code == 409
+                or (r_probe.status_code == 200 and r_probe.json() == []))
+    if is_empty:
+        from github import Github
+        repository = Github(token).get_repo(repo)
+        repository.create_file(path, f"upload {fname}", data)
+        return
+
     r = requests.post(f"{API}/repos/{repo}/git/blobs",
                       json={"content": base64.b64encode(data).decode(),
                             "encoding": "base64"},
