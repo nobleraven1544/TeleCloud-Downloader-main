@@ -106,6 +106,24 @@ def upload_to_s3(file_path: str, chat_id: int, status_msg=None) -> str | None:
     # Fallback: presigned URL (7 days), works regardless of bucket privacy.
     base = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
     frag = f"#k={base64.urlsafe_b64encode(file_key).decode()}" if file_key else ""
+
+    # Presigned URL (7 days) — works regardless of bucket privacy. S3 signatures
+    # only cover the Host header, so we can rewrite t3.storageapi.dev to
+    # PUBLIC_BASE_URL and serve through our own proxy (bypasses Iran filtering).
+    try:
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": AWS_BUCKET_NAME, "Key": key},
+            ExpiresIn=7 * 24 * 3600,  # 7 days
+        )
+        if base:
+            from urllib.parse import urlsplit, urlunsplit
+            parts = list(urlsplit(url))
+            parts[1] = urlsplit(base).netloc
+            url = urlunsplit(parts)
+        return url + frag
+    except Exception as e:
+        print(f"[s3] presign failed: {e}")
     if base:
         return f"{base}/files/{chat_id}/{quote(fname)}{frag}"
 
