@@ -360,8 +360,15 @@ def process_youtube_download(task):
             '_stop': task.get('_stop'),
             'user_id': cid,
         }
+        from config import gdrive_redirects
+        stashed = gdrive_redirects.get(cid) is not None and gdrive_redirects[cid].get('fp') == file_path
         smart_dest(file_path, msg, dest, folder_name=safe_title, task_info=task_info)
-        cleanup_path(folder)
+        # Re-check after smart_dest: if it stashed the file for a pending
+        # Drive connection (gd not linked), the file must survive cleanup —
+        # the user will pick a new destination and the stash is uploaded then.
+        stashed = stashed or (gdrive_redirects.get(cid) is not None and gdrive_redirects[cid].get('fp') == file_path)
+        if not stashed:
+            cleanup_path(folder)
 
     except Exception as e:
         import traceback

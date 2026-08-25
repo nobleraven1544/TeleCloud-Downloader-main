@@ -50,6 +50,7 @@ YT_LABELS = {
 # =============================================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
+    import db
     cid  = call.message.chat.id
     data = call.data
 
@@ -151,6 +152,13 @@ def callback_query(call):
         _handle_admin_user_panel(call, cid, data)
         return
 
+    # ── Destination picker (dest|tg / dest|gd / dest|s3 / dest|github) ──────
+    # The per-file picker builds callback_data "dest|<key>" (no prefix), which
+    # used to fall through every branch below and silently dead-end the button.
+    if data.startswith("dest|"):
+        _handle_dest_pick(call, cid, data)
+        return
+
     if data.startswith("set|"):
         parts  = data.split('|')
         action = parts[1]
@@ -171,38 +179,41 @@ def callback_query(call):
             config.user_download_mode[cid] = new_mode
             toast = t(cid, 'mode_set_toast')
 
-        elif action == "upload":
-            # Cycle saved destination: ask → tg → gd → s3 → github → ask
-            import db as _db
+        elif action == "destmenu":
+            # Open explicit destination picker as a new message
+            bot.answer_callback_query(call.id)
+            from menu import destination_pick_markup
+            bot.send_message(cid, "مقصد آپلود رو انتخاب کن:",
+                             reply_markup=destination_pick_markup(cid))
+            return
+
+        elif action == "back":
+            # Return to the main settings panel (from destination picker)
+            bot.answer_callback_query(call.id)
+            from menu import settings_inline_markup
             try:
-                cur = _db.get_upload_dest(cid)
+                bot.edit_message_reply_markup(
+                    cid, call.message.message_id,
+                    reply_markup=settings_inline_markup(cid))
             except Exception:
-                cur = None
-            if cur is None and cid in config.tg_upload_mode:
-                cur = 'tg'
-            elif cur is None and cid in config.gd_upload_mode:
-                cur = 'gd'
+                pass
+            return
 
-            order = [None, 'tg', 'gd', 's3', 'github']
-            idx = order.index(cur) if cur in order else 0
-            nxt = order[(idx + 1) % len(order)]
-
-            if nxt is None:
-                config.tg_upload_mode.discard(cid)
-                config.gd_upload_mode.discard(cid)
-                toast = 'مقصد آپلود: بپرس (برای هر فایل)'
+        elif action == "upload":
+            current = db.get_upload_dest(cid)
+            # cycle: tg → gd → s3 → github → tg
+            if current == 'tg':
+                db.set_upload_dest(cid, 'gd')
+                toast = 'مقصد آپلود: Google Drive'
+            elif current == 'gd':
+                db.set_upload_dest(cid, 's3')
+                toast = 'مقصد آپلود: Railway S3'
+            elif current == 's3':
+                db.set_upload_dest(cid, 'github')
+                toast = 'مقصد آپلود: GitHub شخصی'
             else:
-                if nxt != 'tg':
-                    config.tg_upload_mode.discard(cid)
-                if nxt != 'gd':
-                    config.gd_upload_mode.discard(cid)
-                _db.set_upload_dest(cid, nxt)
-                toast = {
-                    'tg': '📤 مقصد آپلود: تلگرام',
-                    'gd': '☁️ مقصد آپلود: Google Drive',
-                    's3': '🗄 مقصد آپلود: Railway S3',
-                    'github': '🐙 مقصد آپلود: GitHub',
-                }[nxt]
+                db.set_upload_dest(cid, 'tg')
+                toast = 'مقصد آپلود: تلگرام'
 
         elif action == "qual":
             # Context-aware: audio mode → audio quality, video mode → video quality
@@ -254,36 +265,51 @@ def callback_query(call):
             _handle_gdrive_settings(call, cid)
             return
 
-        elif action == "github":
-            # Open the GitHub setup / status panel as a new message
-            bot.answer_callback_query(call.id)
-            _handle_github_settings(call, cid)
-            return
-
-        elif action == "ghdel":
-            # Disconnect GitHub: clear stored token+repo
-            db.set_github_token(cid, "")
-            db.set_github_repo(cid, "")
-            bot.answer_callback_query(call.id, "GitHub قطع شد")
-            try:
-                bot.edit_message_text(
-                    "🔌 اتصال GitHub حذف شد.",
-                    cid, call.message.message_id,
-                )
-            except Exception:
-                pass
-            from menu import settings_inline_markup as _sim
-            try:
-                bot.send_message(cid, "تنظیمات:", reply_markup=_sim(cid))
-            except Exception:
-                pass
-            return
-
         elif action == "profile":
             # Show the user's daily quota stats (helper lives in handlers.py)
             bot.answer_callback_query(call.id)
             from handlers import _send_profile_stats
             _send_profile_stats(cid)
+            return
+
+        elif action.startswith("dest|"):
+            # Explicit destination pick: dest|tg / dest|gd / dest|s3 / dest|github
+            from config import pending_uploads
+            choice = action.split("|", 1)[1]
+            if choice not in ("tg", "gd", "s3", "github"):
+                bot.answer_callback_query(call.id)
+                return
+
+            # Case A: a file is pending — upload it to the chosen destination NOW
+            pend = pending_uploads.pop(cid, None)
+            if pend:
+                fp = pend['fp']
+                status_msg_id = pend['status_msg_id']
+                bot.answer_callback_query(call.id, f"آپلود به: {choice}")
+                try:
+                    bot.delete_message(cid, call.message.message_id)
+                except Exception:
+                    pass
+                try:
+                    status_msg = bot.send_message(cid, "⏳ آپلود...")
+                    # route through smart_dest with explicit dest
+                    from uploaders.smart_dest import smart_dest
+                    smart_dest(fp, status_msg, dest=choice, folder_name="FilesFromTel",
+                               task_info={'chat_id': cid, 'user_id': cid})
+                except Exception as e:
+                    bot.send_message(cid, f"❌ خطا: {e}")
+                return
+
+            # Case B: no pending file — just set default destination
+            db.set_upload_dest(cid, choice)
+            bot.answer_callback_query(call.id, f"مقصد پیش‌فرض تنظیم شد: {choice}")
+            from menu import destination_pick_markup
+            try:
+                bot.edit_message_reply_markup(
+                    cid, call.message.message_id,
+                    reply_markup=destination_pick_markup(cid))
+            except Exception:
+                pass
             return
 
         else:
@@ -415,7 +441,7 @@ def callback_query(call):
         if not url:
             bot.answer_callback_query(call.id, t(cid, 'link_expired_toast'), show_alert=True)
             return
-        dest = get_dest(cid) or 'gd'
+        dest = get_dest(cid) or 'tg'
         fmt  = "bestaudio/best" if kind == 'a' else "bestvideo+bestaudio/best"
         from dest_helpers import (get_audio_format, get_audio_quality,
                                   get_video_format, get_subtitle, get_chapters)
@@ -586,11 +612,8 @@ def callback_query(call):
         if not url:
             bot.answer_callback_query(call.id, t(cid, 'link_expired_toast'), show_alert=True)
             return
-        dest_mk = types.InlineKeyboardMarkup()
-        dest_mk.row(
-            types.InlineKeyboardButton(t(cid, 'btn_tg'), callback_data=f"scd|{kind}|{fid}|tg|{mid}"),
-            types.InlineKeyboardButton(t(cid, 'btn_gd'), callback_data=f"scd|{kind}|{fid}|gd|{mid}"),
-        )
+        from menu import dest_pick_markup
+        dest_mk = dest_pick_markup(cid, prefix=f"scd|{kind}|{fid}|{mid}", back=f"scd|{kind}|{fid}|{mid}|back")
         try:
             bot.edit_message_text(t(cid, 'select_dest'), cid, call.message.message_id,
                                   reply_markup=dest_mk)
@@ -600,9 +623,12 @@ def callback_query(call):
         return
 
     if data.startswith("scd|"):
+        # Format: scd|kind|fid|mid|dest
         parts = data.split('|', 4)
-        # Format: scd|kind|fid|dest|mid
-        _, kind, fid, dest, mid_s = parts
+        if len(parts) < 5:
+            bot.answer_callback_query(call.id, t(cid, 'invalid_option_toast'), show_alert=True)
+            return
+        _, kind, fid, mid_s, dest = parts
         mid = int(mid_s)
         with cache_lock:
             url = url_cache.get((cid, mid))
@@ -638,9 +664,92 @@ def callback_query(call):
         _handle_yt_quality(call, cid, data)
         return
 
+    # Generic back button for the per-source destination pickers
+    # (formats: ytd|<q>|<mid>|back, tr|<mid>|back, dl|<mid>|back, scd|<k>|<f>|<mid>|back)
+    if data.endswith("|back"):
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(t(cid, 'select_dest_cancelled'), cid, call.message.message_id,
+                                  reply_markup=None)
+        except Exception:
+            pass
+        return
+
     if data.startswith("ytd|"):
         _handle_yt_dest(call, cid, data)
         return
+
+
+# =============================================================
+# Destination picker: dest|tg / dest|gd / dest|s3 / dest|github
+# =============================================================
+def _handle_dest_pick(call, cid, data):
+    import db as _db
+    from config import pending_uploads, gdrive_redirects
+    choice = data.split("|", 1)[1]
+
+    # Case A2: a download finished but Drive wasn't connected — re-route it.
+    redir = gdrive_redirects.pop(cid, None)
+    if redir and choice in ("tg", "s3", "github"):
+        bot.answer_callback_query(call.id, f"آپلود به: {choice}")
+        try:
+            bot.delete_message(cid, call.message.message_id)
+        except Exception:
+            pass
+        try:
+            status_msg = bot.send_message(cid, "⏳ آپلود...")
+            from uploaders.smart_dest import smart_dest
+            smart_dest(redir['fp'], status_msg, dest=choice,
+                       folder_name=redir.get('folder_name'),
+                       task_info=redir.get('task_info'))
+        except Exception as e:
+            bot.send_message(cid, f"❌ خطا: {e}")
+        return
+    if redir:
+        gdrive_redirects[cid] = redir  # 'gd' picked again — keep stash
+    if choice == "ask":
+        # Reset to per-file asking (no stored default).
+        _db.clear_upload_dest(cid)
+        bot.answer_callback_query(call.id, "هر فایل مقصد پرسیده میشه")
+        from menu import destination_pick_markup
+        try:
+            bot.edit_message_reply_markup(cid, call.message.message_id,
+                                          reply_markup=destination_pick_markup(cid))
+        except Exception:
+            pass
+        return
+    if choice not in ("gd", "s3", "github"):
+        bot.answer_callback_query(call.id)
+        return
+
+    # Case A: a file is pending — upload it to the chosen destination NOW
+    pend = pending_uploads.pop(cid, None)
+    if pend:
+        fp = pend['fp']
+        bot.answer_callback_query(call.id, f"آپلود به: {choice}")
+        try:
+            bot.delete_message(cid, call.message.message_id)
+        except Exception:
+            pass
+        try:
+            status_msg = bot.send_message(cid, "⏳ آپلود...")
+            from uploaders.smart_dest import smart_dest
+            smart_dest(fp, status_msg, dest=choice, folder_name="FilesFromTel",
+                       task_info={'chat_id': cid, 'user_id': cid})
+        except Exception as e:
+            bot.send_message(cid, f"❌ خطا: {e}")
+        return
+
+    # Case B: no pending file — set default destination
+    _db.set_upload_dest(cid, choice)
+    bot.answer_callback_query(call.id, f"مقصد پیش‌فرض تنظیم شد: {choice}")
+    from menu import destination_pick_markup
+    try:
+        bot.edit_message_reply_markup(
+            cid, call.message.message_id,
+            reply_markup=destination_pick_markup(cid))
+    except Exception:
+        pass
 
 
 # =============================================================
@@ -715,11 +824,13 @@ def _enqueue_playlist(call, cid, url, mid, end_idx, audio, quality):
     else:
         dest_mk = types.InlineKeyboardMarkup()
         dest_mk.row(
-            types.InlineKeyboardButton(t(cid, 'btn_tg'),
-                callback_data=f"pld|{end_idx}|tg|{mid}|{'1' if audio else '0'}|{quality}"),
+            types.InlineKeyboardButton('🗄 S3',
+                callback_data=f"pld|{end_idx}|s3|{mid}|{'1' if audio else '0'}|{quality}"),
             types.InlineKeyboardButton(t(cid, 'btn_gd'),
                 callback_data=f"pld|{end_idx}|gd|{mid}|{'1' if audio else '0'}|{quality}"),
         )
+        dest_mk.add(types.InlineKeyboardButton("🐙 GitHub",
+            callback_data=f"pld|{end_idx}|github|{mid}|{'1' if audio else '0'}|{quality}"))
         count_str = str(end_idx) if end_idx < 9999 else t(cid, 'playlist_all_btn')
         if audio:
             media_label = t(cid, 'playlist_media_audio')
@@ -758,7 +869,14 @@ def _handle_yt_quality(call, cid, data):
             return
         fmt, audio_only = YT_FMT_MAP[quality]
         try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+            from downloaders.youtube import _yt_proxy
+            import cookies as _ck
+            _opts = {'quiet': True, 'skip_download': True}
+            _cf = _ck.active_cookies_file(url, cid)
+            if _cf: _opts['cookiefile'] = _cf
+            _px = _yt_proxy()
+            if _px: _opts['proxy'] = _px
+            with yt_dlp.YoutubeDL(_opts) as ydl:
                 info  = ydl.extract_info(url, download=False)
                 title = info.get('title', 'video')
         except Exception:
@@ -787,11 +905,8 @@ def _handle_yt_quality(call, cid, data):
             pass
         bot.answer_callback_query(call.id)
     else:
-        dest_mk = types.InlineKeyboardMarkup()
-        dest_mk.row(
-            types.InlineKeyboardButton(t(cid, 'btn_tg'), callback_data=f"ytd|{quality}|tg|{msg_id}"),
-            types.InlineKeyboardButton(t(cid, 'btn_gd'), callback_data=f"ytd|{quality}|gd|{msg_id}"),
-        )
+        from menu import dest_pick_markup
+        dest_mk = dest_pick_markup(cid, prefix=f"ytd|{quality}|{msg_id}", back=f"ytd|{quality}|{msg_id}|back")
         try:
             bot.edit_message_text(
                 t(cid, 'yt_quality_dest_only', quality=YT_LABELS.get(quality, quality)),
@@ -803,7 +918,12 @@ def _handle_yt_quality(call, cid, data):
 
 def _handle_yt_dest(call, cid, data):
     import yt_dlp
-    _, quality, dest, mid = data.split('|', 3)
+    # data format: ytd|{quality}|{mid}|{dest}
+    parts = data.split('|', 3)
+    if len(parts) < 4:
+        bot.answer_callback_query(call.id, t(cid, 'invalid_option_toast'), show_alert=True)
+        return
+    _, quality, mid, dest = parts
     msg_id = int(mid)
     with cache_lock:
         url = url_cache.get((cid, msg_id))
@@ -815,7 +935,14 @@ def _handle_yt_dest(call, cid, data):
         return
     fmt, audio_only = YT_FMT_MAP[quality]
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+        from downloaders.youtube import _yt_proxy
+        import cookies as _ck
+        _opts = {'quiet': True, 'skip_download': True}
+        _cf = _ck.active_cookies_file(url, cid)
+        if _cf: _opts['cookiefile'] = _cf
+        _px = _yt_proxy()
+        if _px: _opts['proxy'] = _px
+        with yt_dlp.YoutubeDL(_opts) as ydl:
             info  = ydl.extract_info(url, download=False)
             title = info.get('title', 'video')
     except Exception:
@@ -938,11 +1065,13 @@ def _handle_scpl_count(call, cid, data):
     else:
         dest_mk = types.InlineKeyboardMarkup()
         dest_mk.row(
-            types.InlineKeyboardButton(t(cid, 'btn_tg'),
-                callback_data=f"scpl_dest|{mid}|{count}|tg"),
+            types.InlineKeyboardButton('🗄 S3',
+                callback_data=f"scpl_dest|{mid}|{count}|s3"),
             types.InlineKeyboardButton(t(cid, 'btn_gd'),
                 callback_data=f"scpl_dest|{mid}|{count}|gd"),
         )
+        dest_mk.add(types.InlineKeyboardButton("🐙 GitHub",
+            callback_data=f"scpl_dest|{mid}|{count}|github"))
         count_display = t(cid, 'playlist_all_btn') if count == 'all' else count
         try:
             bot.edit_message_text(
@@ -1493,17 +1622,10 @@ def _handle_gdrive_settings(call, cid: int) -> None:
     global rclone.conf and should never be prompted to reconnect.
     """
     from pathlib import Path
-    from config import USER_CONFIGS_DIR, COLAB_URL, ADMIN_ID
+    from config import USER_CONFIGS_DIR, COLAB_URL
 
-    # ── Admin always shows "connected via system default" ────────────────
-    if cid == ADMIN_ID:
-        bot.send_message(
-            cid,
-            t(cid, 'gdrive_status_connected'),
-            parse_mode='HTML',
-        )
-        return
-
+    # Admin uses the same per-user rclone config flow as regular users,
+    # so they can connect their OWN Drive too.
     conf_path = Path(USER_CONFIGS_DIR) / f"rclone_{cid}.conf"
 
     if conf_path.exists():
@@ -1597,113 +1719,3 @@ def _handle_gdrive_callback(call, cid: int, data: str) -> None:
 
 # (Profile stats helper lives in handlers.py to avoid circular imports;
 #  callbacks.py imports it lazily inside the set|profile branch above.)
-
-
-def _handle_github_settings(call, cid: int) -> None:
-    """
-    Show either the connect instructions (ask for token) or a connected panel.
-    Mirrors the Google Drive settings UX.
-    """
-    import types as _types
-    from telebot import types
-    token = None
-    repo = None
-    try:
-        token = db.get_github_token(cid)
-        repo = db.get_github_repo(cid)
-    except Exception:
-        pass
-
-    if token and repo:
-        mk = types.InlineKeyboardMarkup()
-        mk.add(types.InlineKeyboardButton(
-            "🔌 قطع اتصال GitHub", callback_data="set|ghdel"))
-        bot.send_message(
-            cid,
-            f"<b>🐙 GitHub متصل است</b>\n"
-            f"ریپو: <code>{repo}</code>\n\n"
-            "فایل‌های آپلودی به این ریپو می‌روند و لینک مستقیم می‌گیری.",
-            parse_mode="HTML",
-            reply_markup=mk,
-        )
-        return
-
-    # Not connected → ask for the token via state machine
-    user_state[cid] = "await_github_token"
-    bot.send_message(
-        cid,
-        "<b>🐙 اتصال GitHub</b>\n\n"
-        "۱) یک <b>Personal Access Token</b> بساز:\n"
-        "github.com/settings/tokens → Generate new token (classic)\n"
-        "فقط دسترسی <code>repo</code> کافی است.\n\n"
-        "۲) توکن را همین‌جا بفرست (پیوات بماند):\n"
-        "<code>ghp_xxxxxxxxxxxx</code>\n\n"
-        "ربات خودش یک ریپوی private به اسم <code>telecloud-uploads</code> برایت می‌سازد.\n\n"
-        "برای لغو، /cancel بزن.",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-
-
-def _handle_github_token_text(cid: int, text: str) -> bool:
-    """Consume 'await_github_token' state; returns True if handled."""
-    token = text.strip()
-    if not re.fullmatch(r"(ghp|github_pat|gho|ghu|ghs)_[A-Za-z0-9_]+", token):
-        bot.send_message(
-            cid,
-            "❌ فرمت توکن معتبر نیست. توکن با ghp_ یا github_pat_ شروع می‌شود.\n"
-            "دوباره بفرست یا /cancel بزن.")
-        return True
-
-    import requests as _rq
-    try:
-        login_r = _rq.get("https://api.github.com/user",
-                          headers={"Authorization": f"token {token}"},
-                          timeout=20).json()
-        login = login_r.get("login", "")
-        if not login:
-            bot.send_message(cid, "❌ توکن معتبر نیست. دوباره امتحان کن یا /cancel بزن.")
-            return True
-
-        r = _rq.post("https://api.github.com/user/repos",
-                     json={"name": "telecloud-uploads", "private": True,
-                           "description": "TeleCloud-Downloader uploads"},
-                     headers={"Authorization": f"token {token}",
-                              "Accept": "application/vnd.github+json"},
-                     timeout=20)
-        if r.status_code == 201 or (r.status_code == 422):
-            repo = f"{login}/telecloud-uploads"
-        else:
-            bot.send_message(
-                cid,
-                "❌ اجازهٔ ساخت ریپو نداد. دسترسی repo را چک کن یا اگر ریپو داری "
-                "اسمش را بفرست (owner/repo):")
-            user_state[cid] = "await_github_repo"
-            db.set_github_token(cid, token)
-            return True
-
-        db.set_github_token(cid, token)
-        db.set_github_repo(cid, repo)
-        user_state[cid] = None
-        bot.send_message(
-            cid,
-            f"✅ GitHub وصل شد!\nریپو: <code>{repo}</code>\n"
-            "حالا در تنظیمات، مقصد آپلود را روی 🐙 GitHub بگذار.",
-            parse_mode="HTML")
-        return True
-    except Exception as e:
-        bot.send_message(cid, f"❌ خطا در اتصال به GitHub: {e}")
-        return True
-
-
-def _handle_github_repo_text(cid: int, text: str) -> bool:
-    """Consume 'await_github_repo' state; returns True if handled."""
-    repo = text.strip().lstrip("@")
-    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
-        bot.send_message(cid, "❌ فرمت درست: owner/repo — دوباره بفرست یا /cancel.")
-        return True
-    db.set_github_repo(cid, repo)
-    user_state[cid] = None
-    bot.send_message(cid, f"✅ ریپو ست شد: <code>{repo}</code>", parse_mode="HTML")
-    return True
-
