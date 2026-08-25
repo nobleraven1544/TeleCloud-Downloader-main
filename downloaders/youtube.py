@@ -27,11 +27,15 @@ def _yt_proxy():
 
 
 def _yt_client_args(cf):
-    """Extractor args for YouTube depending on cookie availability."""
+    """Extractor args for YouTube depending on cookie availability.
+
+    Measured on Railway (2026-08): cookie+proxy with yt-dlp's DEFAULT client
+    selection yields up to 1080p; forcing tv_simply/web_safari/mweb DROPS it
+    to 360p. So when a cookie exists we do NOT override clients at all.
+    Without a cookie, tv_simply is the only client that dodges the bot-check
+    on flagged datacenter IPs."""
     if cf:
-        # Cookie alone on datacenter IPs yields low-res formats only;
-        # alternate clients restore up to 1080p.
-        return {'youtube': {'player_client': ['tv_simply', 'web_safari', 'mweb']}}
+        return None  # no override — use yt-dlp defaults
     return {'youtube': {'player_client': ['tv_simply']}}
 
 
@@ -180,7 +184,8 @@ def _build_ydl_opts(task: dict, folder: str, hook) -> dict:
     cf = active_cookies_file(task.get('url', ''), cid)
     if cf:
         ydl_opts['cookiefile'] = cf
-    ydl_opts['extractor_args'] = _yt_client_args(cf)
+    _ca = _yt_client_args(cf)
+    if _ca: ydl_opts['extractor_args'] = _ca
     if not cf:
         ydl_opts['nocheckcertificate'] = True
     _px = _yt_proxy()
@@ -482,7 +487,8 @@ def process_playlist_download(task):
         if embed_chap and not audio_only:
             ydl_opts['embedchapters'] = True
         if cf: ydl_opts['cookiefile'] = cf
-        ydl_opts['extractor_args'] = _yt_client_args(cf)
+        _ca = _yt_client_args(cf)
+        if _ca: ydl_opts['extractor_args'] = _ca
         if not cf:
             ydl_opts['nocheckcertificate'] = True
         _px = _yt_proxy()
