@@ -16,6 +16,25 @@ from utils import (check_disk_space, get_free_space, cleanup_path,
                    fmt_size, build_rich_progress_card, friendly_error, safe_tg_call)
 from uploaders.smart_dest import smart_dest
 
+
+def _yt_proxy():
+    """Optional egress proxy for YouTube. Set YT_PROXY env (http://user:pass@host:port).
+    Empty value, 'off' or 'none' disables the proxy entirely."""
+    v = (os.environ.get('YT_PROXY') or '').strip()
+    if not v or v.lower() in ('off', 'none', 'disabled', '0', 'false'):
+        return None
+    return v
+
+
+def _yt_client_args(cf):
+    """Extractor args for YouTube depending on cookie availability."""
+    if cf:
+        # Cookie alone on datacenter IPs yields low-res formats only;
+        # alternate clients restore up to 1080p.
+        return {'youtube': {'player_client': ['tv_simply', 'web_safari', 'mweb']}}
+    return {'youtube': {'player_client': ['tv_simply']}}
+
+
 def _cancel_markup(cid=None):
     from telebot import types
     from locales import t
@@ -31,13 +50,14 @@ def get_format_sizes(url: str, cid=None) -> dict:
     opts  = {
         'quiet': True,
         'skip_download': True,
-        'js_runtimes': {'node': {}},
+        'js_runtimes': {'deno': {}, 'node': {}},
     }
-    if cf:
-        opts['cookiefile'] = cf
+    if cf: opts['cookiefile'] = cf
     else:
-        opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+        opts['extractor_args'] = _yt_client_args(None)
         opts['nocheckcertificate'] = True
+    _px = _yt_proxy()
+    if _px: opts['proxy'] = _px
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -146,7 +166,7 @@ def _build_ydl_opts(task: dict, folder: str, hook) -> dict:
         'writethumbnail':      audio_only,
         'quiet':               True,
         'no_warnings':         True,
-        'js_runtimes':         {'node': {}},
+        'js_runtimes':         {'deno': {}, 'node': {}},
         'windowsfilenames':    True,
         'concurrent_fragment_downloads': 4,
         'throttledratelimit':           100000,
@@ -160,7 +180,11 @@ def _build_ydl_opts(task: dict, folder: str, hook) -> dict:
     cf = active_cookies_file(task.get('url', ''), cid)
     if cf:
         ydl_opts['cookiefile'] = cf
-
+    ydl_opts['extractor_args'] = _yt_client_args(cf)
+    if not cf:
+        ydl_opts['nocheckcertificate'] = True
+    _px = _yt_proxy()
+    if _px: ydl_opts['proxy'] = _px
     return ydl_opts
 
 
@@ -190,7 +214,7 @@ def process_youtube_download(task):
     from locales import t
     chat_id = task['chat_id']
     cid     = chat_id
-    dest    = task.get('dest') or ('tg' if chat_id in tg_upload_mode else 'gd')
+    dest    = task.get('dest') or 'tg'
 
     if not check_disk_space():
         bot.send_message(chat_id, t(cid, 'disk_no_space', free=get_free_space()))
@@ -261,9 +285,8 @@ def process_youtube_download(task):
         except Exception: pass
 
         # ── Byte quota accounting ──────────────────────────────
-        if cid != ADMIN_ID:
-            real_size = os.path.getsize(file_path) if os.path.isfile(file_path) else 0
-            db.record_download_bytes(cid, real_size)
+        real_size = os.path.getsize(file_path) if os.path.isfile(file_path) else 0
+        db.record_download_bytes(cid, real_size)
 
         final_title = task.get('actual_title', title_kw)
         final_artist = None
@@ -348,12 +371,14 @@ def fetch_playlist_entries(url: str, cf=None) -> tuple:
         'quiet': True,
         'skip_download': True,
         'extract_flat': True,
-        'js_runtimes': {'node': {}},
+        'js_runtimes': {'deno': {}, 'node': {}},
     }
     if cf: opts['cookiefile'] = cf
     else:
-        opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+        opts['extractor_args'] = _yt_client_args(None)
         opts['nocheckcertificate'] = True
+    _px = _yt_proxy()
+    if _px: opts['proxy'] = _px
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return list(info.get('entries', [])), info.get('title', 'playlist')
@@ -364,7 +389,7 @@ def process_playlist_download(task):
     from locales import t
     chat_id    = task['chat_id']
     cid        = chat_id
-    dest       = task.get('dest') or ('tg' if chat_id in tg_upload_mode else 'gd')
+    dest       = task.get('dest') or 'tg'
     url        = task['url']
     audio_only = task.get('audio_only', False)
     fmt        = task.get('format', 'bestvideo+bestaudio/best')
@@ -448,7 +473,7 @@ def process_playlist_download(task):
             'merge_output_format': merge_fmt,
             'quiet':               True,
             'no_warnings':         True,
-            'js_runtimes':         {'node': {}},
+            'js_runtimes':         {'deno': {}, 'node': {}},
             'windowsfilenames':    True,
             'concurrent_fragment_downloads': 4,
             'throttledratelimit':           100000,
@@ -457,9 +482,11 @@ def process_playlist_download(task):
         if embed_chap and not audio_only:
             ydl_opts['embedchapters'] = True
         if cf: ydl_opts['cookiefile'] = cf
-        else:
-            ydl_opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+        ydl_opts['extractor_args'] = _yt_client_args(cf)
+        if not cf:
             ydl_opts['nocheckcertificate'] = True
+        _px = _yt_proxy()
+        if _px: ydl_opts['proxy'] = _px
 
         fp = None
         try:
@@ -472,9 +499,8 @@ def process_playlist_download(task):
 
             if fp and not task['_stop'].is_set():
                 # ── Byte quota accounting ──────────────────
-                if cid != ADMIN_ID:
-                    real_size = os.path.getsize(fp) if os.path.isfile(fp) else 0
-                    db.record_download_bytes(cid, real_size)
+                real_size = os.path.getsize(fp) if os.path.isfile(fp) else 0
+                db.record_download_bytes(cid, real_size)
                 sub = bot.send_message(chat_id, t(cid, 'uploading_item', idx=idx, total=total, name=os.path.basename(fp)))
                 item_info = task_info_base.copy()
                 item_info['title'] = os.path.basename(fp)
