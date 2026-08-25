@@ -8,14 +8,16 @@ def smart_dest(file_path: str, status_msg, dest: str = None, folder_name: str = 
     Send the file to the correct destination.
     dest='tg'      → Telegram (auto-redirects to Drive if size > 2GB)
     dest='gd'      → Google Drive (per-user rclone config)
-    dest='s3'      → Railway Bucket (S3-compatible), presigned link
+    dest='s3'      → Railway Bucket (S3-compatible), public link
     dest='github'  → user's own GitHub repo (per-user token), raw link
-    dest=None      → reads from user's saved upload_dest, else Telegram
+    dest=None      → reads from user's upload toggle (tg_upload_mode set,
+                     otherwise per-user db.upload_dest, fallback to Drive)
     """
     from locales import t
     from config import tg_upload_mode
     from uploaders.telegram_upload import upload_file_to_telegram
     from uploaders.gdrive_upload import upload_to_gdrive_cancellable
+    from uploaders.s3_upload import upload_to_s3
     from uploaders.github_upload import upload_to_github
 
     chat_id = status_msg.chat.id
@@ -24,33 +26,18 @@ def smart_dest(file_path: str, status_msg, dest: str = None, folder_name: str = 
         task_info = {}
 
     if dest is None:
+        import db
         try:
-            import db
             d = db.get_upload_dest(cid)
+            # 'ask' means the user wants to be asked per file — default to
+            # Telegram, never silently fall through to Drive.
             dest = d if d in ('s3', 'github', 'gd') else 'tg'
         except Exception:
-            dest = 'tg'
-        if dest == 'gd' and cid in tg_upload_mode:
-            dest = 'tg'
-
-    # If Drive chosen but user has no rclone config → fall back to Telegram
-    if dest == 'gd':
-        from pathlib import Path
-        from config import USER_CONFIGS_DIR
-        if not Path(USER_CONFIGS_DIR, f"rclone_{cid}.conf").exists():
-            try:
-                bot.edit_message_text(
-                    "☁️ گوگل درایو وصل نیست — فایل به تلگرام ارسال شد. "
-                    "برای آپلود به Drive/S3/GitHub از تنظیمات مقصد را عوض کن.",
-                    chat_id, status_msg.message_id,
-                )
-            except Exception:
-                pass
             dest = 'tg'
 
     size = get_file_size(file_path)
 
-    # Prevent sending a new message for large files destined for Telegram
+    # Local Bot API allows up to 2GB; if a single file is larger, redirect to Drive.
     if size > 2000 * 1024 * 1024 and dest == 'tg':
         try:
             bot.edit_message_text(
@@ -63,37 +50,49 @@ def smart_dest(file_path: str, status_msg, dest: str = None, folder_name: str = 
 
     if dest == 'tg':
         upload_file_to_telegram(file_path, status_msg, task_info)
-    elif dest == 'github':
-        url = upload_to_github(file_path, cid, status_msg)
-        _reply_link(status_msg, url, "GitHub", cid)
     elif dest == 's3':
-        from uploaders.s3_upload import upload_to_s3
-        url = upload_to_s3(file_path, cid, status_msg)
+        url = upload_to_s3(file_path, chat_id, status_msg)
         _reply_link(status_msg, url, "S3/Railway", cid)
+    elif dest == 'github':
+        url = upload_to_github(file_path, chat_id, status_msg)
+        _reply_link(status_msg, url, "GitHub", cid)
     else:
-        user_id = task_info.get('user_id')
-        upload_to_gdrive_cancellable(
-            file_path, status_msg,
-            folder_name=folder_name,
-            task_info=task_info,
-            user_id=user_id,
-        )
+        # gdrive — if the user never connected Drive, say so clearly instead
+        # of a raw rclone traceback.
+        from pathlib import Path
+        from config import USER_CONFIGS_DIR
+        if not Path(USER_CONFIGS_DIR, f"rclone_{cid}.conf").exists():
+            # Stash the file so the destination-pick callback can upload it.
+            from config import gdrive_redirects
+            gdrive_redirects[cid] = {'fp': file_path, 'folder_name': folder_name,
+                                     'task_info': task_info}
+            from menu import dest_pick_markup
+            try:
+                bot.edit_message_text(
+                    "☁️ Google Drive وصل نیست. مقصد دیگه‌ای انتخاب کن:",
+                    cid, status_msg.message_id,
+                    reply_markup=dest_pick_markup(cid))
+            except Exception:
+                pass
+            return
+        upload_to_gdrive_cancellable(file_path, status_msg, folder_name, False, task_info)
 
 
-def _reply_link(status_msg, url: str, label: str, cid: int):
-    """Send the download link after a cloud upload (or an error notice)."""
+def _reply_link(status_msg, url: str | None, label: str, cid: int):
     from locales import t
     if url:
         try:
-            status_msg.edit_text(f"✅ آپلود به {label} انجام شد:\n{url}",
-                                 disable_web_page_preview=True)
+            bot.edit_message_text(
+                f"{label} link:\n{url}",
+                cid, status_msg.message_id
+            )
         except Exception:
-            from config import bot
-            bot.send_message(cid, f"✅ آپلود به {label} انجام شد:\n{url}",
-                             disable_web_page_preview=True)
+            pass
     else:
         try:
-            status_msg.edit_text(
-                f"❌ خطا در آپلود به {label}. دوباره امتحان کن یا مقصد دیگه‌ای انتخاب کن.")
+            bot.edit_message_text(
+                t(cid, 'upload_failed_toast'),
+                cid, status_msg.message_id
+            )
         except Exception:
             pass
