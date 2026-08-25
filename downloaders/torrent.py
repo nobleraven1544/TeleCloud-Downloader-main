@@ -99,7 +99,7 @@ def _do_torrent_download(task, msg):
     from config import tg_upload_mode
     chat_id = task['chat_id']
     cid     = chat_id
-    dest    = task.get('dest') or ('tg' if chat_id in tg_upload_mode else 'gd')
+    dest    = task.get('dest')  # no silent Drive fallback — caller must decide
     TIMEOUT = 20 * 60
     task['_active_path'] = None
     session_dir = os.path.join(DOWNLOAD_DIR, f".torrent_{chat_id}_{int(time.time())}_{os.getpid()}")
@@ -124,6 +124,7 @@ def _do_torrent_download(task, msg):
                                               stderr=subprocess.STDOUT, text=True, bufsize=1)
         last_update        = time.time()
         last_progress_time = time.time()
+        torrent_start      = time.time()
         last_percent       = -1
         output_lines       = []
         pi                 = {"percent": 0.0, "speed": 0.0, "peers": 0, "eta": 0,
@@ -196,7 +197,8 @@ def _do_torrent_download(task, msg):
                     card = build_rich_progress_card(
                         "🧲", t(cid, 'torrent_downloading'),
                         pi["percent"], pi["dl_bytes"], pi["total_bytes"],
-                        pi["speed"], pi["eta"], source_label, "", cid=cid)
+                        pi["speed"], pi["eta"], source_label, "", cid=cid,
+                        started_at=torrent_start)
                     if timeout_warn:
                         card += timeout_warn
                     try:

@@ -7,14 +7,16 @@ a presigned GET URL (valid 7 days). This works regardless of bucket privacy.
 """
 
 import os
+import time
 import base64
 import secrets
 import boto3
 from urllib.parse import quote
-from config import (
-    AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-    AWS_DEFAULT_REGION, AWS_BUCKET_NAME,
-)
+AWS_ENDPOINT_URL       = os.environ.get('AWS_ENDPOINT_URL', '')
+AWS_ACCESS_KEY_ID      = os.environ.get('AWS_ACCESS_KEY_ID', '')
+AWS_SECRET_ACCESS_KEY  = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+AWS_DEFAULT_REGION     = os.environ.get('AWS_DEFAULT_REGION', 'auto')
+AWS_BUCKET_NAME        = os.environ.get('AWS_BUCKET_NAME', '')
 
 
 def _client():
@@ -86,16 +88,46 @@ def upload_to_s3(file_path: str, chat_id: int, status_msg=None) -> str | None:
     # SSE-C: server-side encryption with a customer-provided per-file key.
     file_key = secrets.token_bytes(32)
     key_md5 = base64.b64encode(__import__('hashlib').md5(file_key).digest()).decode()
+
+    # Live progress card: size, %, speed, ETA, elapsed — edited into status_msg
+    total_bytes = os.path.getsize(file_path)
+    up_start = time.time()
+    last_edit = [0.0]
+    from config import bot as _tg_bot
+
+    def _s3_progress(n):
+        import time as _t
+        from utils import build_rich_progress_card, safe_tg_call
+        now = _t.time()
+        if now - last_edit[0] < 3 and n < total_bytes:
+            return
+        last_edit[0] = now
+        done = min(n, total_bytes)
+        pct = done / total_bytes * 100 if total_bytes else 100
+        elapsed = max(now - up_start, 0.001)
+        speed = done / elapsed
+        eta = int((total_bytes - done) / speed) if speed > 0 else 0
+        try:
+            card = build_rich_progress_card(
+                "🪣", fname, pct, done, total_bytes, speed, eta,
+                "Direct link", "", cid=chat_id, started_at=up_start)
+            safe_tg_call(_tg_bot.edit_message_text, card,
+                         status_msg.chat.id, status_msg.message_id)
+        except Exception:
+            pass
+
     try:
         client.upload_file(
             file_path, AWS_BUCKET_NAME, key,
+            Callback=_s3_progress,
             ExtraArgs={'SSECustomerAlgorithm': 'AES256',
-                       'SSECustomerKey': file_key,
+                       'SSECustomerKey': base64.b64encode(file_key).decode(),
                        'SSECustomerKeyMD5': key_md5})
     except Exception as e:
         print(f"[s3] encrypted upload failed ({type(e).__name__}), falling back to plain: {e}")
         try:
-            client.upload_file(file_path, AWS_BUCKET_NAME, key)
+            client.upload_file(file_path, AWS_BUCKET_NAME, key,
+                               Callback=_s3_progress)
         except Exception as e2:
             print(f"[s3] upload failed: {e2}")
             return None

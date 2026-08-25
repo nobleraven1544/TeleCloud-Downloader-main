@@ -27,6 +27,7 @@ def main_menu_markup(cid=None):
         types.KeyboardButton(t(cid, 'btn_settings')    if cid else "تنظیمات ⚙️"),
         types.KeyboardButton(t(cid, 'btn_cancel')      if cid else "❌ لغو عملیات فعلی"),
         types.KeyboardButton(t(cid, 'btn_queue')       if cid else "📊 وضعیت صف"),
+        types.KeyboardButton("🧩 چسباندن پارت‌ها"),
         types.KeyboardButton(t(cid, 'btn_profile')     if cid else "👤 پروفایل من"),
         types.KeyboardButton(t(cid, 'btn_change_lang') if cid else "تغییر زبان 🌐"),
         types.KeyboardButton(t(cid, 'btn_help')        if cid else "ℹ️ راهنما"),
@@ -101,7 +102,7 @@ def settings_inline_markup(cid=None):
     _dest_labels = {
         'tg':     '📤 آپلود: تلگرام',
         'gd':     '☁️ آپلود: Google Drive',
-        's3':     '🗄 آپلود: Railway S3',
+        's3':     '🔗 آپلود: Direct link',
         'github': '🐙 آپلود: GitHub',
         None:     '❓ آپلود: بپرس',
     }
@@ -118,6 +119,7 @@ def settings_inline_markup(cid=None):
         quality_label = "🎯 Quality: Manual"
         format_label  = "📦 Format: MP4"
 
+    media_label = ("🎵 Media: Audio" if audio_mode else "🎬 Media: Video") if cid else "🎬 Media"
     subtitle_label = get_subtitle_label(cid) if cid else "💬 Subtitle: Off"
     chapters_label = get_chapters_label(cid) if cid else "📑 Chapters: Off"
     cookie_label   = t(cid, 'btn_cookie') if cid else "🍪 Cookie Manager"
@@ -206,3 +208,25 @@ def cookie_item_markup(name: str, cid=None):
 def get_cookie_help(cid=None) -> str:
     """Return the localized cookie help text."""
     return t(cid, 'cookie_help') if cid else t(0, 'cookie_help')
+
+
+def dest_pick_markup(cid=None, prefix="ytd", back=None):
+    """Per-file destination picker used before enqueueing a download.
+    Buttons: Telegram / Google Drive / Direct link (S3) / GitHub [+ Back]."""
+    from telebot import types
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.add(
+        types.InlineKeyboardButton("📤 تلگرام", callback_data=f"{prefix}|tg"),
+        types.InlineKeyboardButton("☁️ Google Drive", callback_data=f"{prefix}|gd"),
+        types.InlineKeyboardButton("🔗 Direct link", callback_data=f"{prefix}|s3"),
+        types.InlineKeyboardButton("🐙 GitHub", callback_data=f"{prefix}|github"),
+    )
+    if back:
+        mk.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=back))
+    return mk
+
+
+def destination_pick_markup(cid=None):
+    """Picker shown after an incoming Telegram file (no back button)."""
+    return dest_pick_markup(cid, prefix="up")
+

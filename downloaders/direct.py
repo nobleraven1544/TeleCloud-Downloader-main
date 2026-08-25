@@ -53,7 +53,7 @@ def process_direct_download(task):
     from config import tg_upload_mode
     chat_id = task['chat_id']
     cid     = chat_id
-    dest    = task.get('dest') or ('tg' if chat_id in tg_upload_mode else 'gd')
+    dest    = task.get('dest')  # no silent Drive fallback — caller must decide
 
     if not check_disk_space():
         bot.send_message(chat_id, t(cid, 'disk_no_space', free=get_free_space()))
@@ -91,7 +91,7 @@ def process_direct_download(task):
                             pct     = downloaded / total * 100
                             card = build_rich_progress_card(
                                 "⬇️", filename, pct, downloaded, total, speed, eta,
-                                "Direct Link", "", cid=cid)
+                                "Direct Link", "", cid=cid, started_at=start_time)
                             try:
                                 safe_tg_call(bot.edit_message_text, card, chat_id, msg.message_id, reply_markup=_cancel_markup(cid))
                             except Exception:
