@@ -16,29 +16,6 @@ from utils import (check_disk_space, get_free_space, cleanup_path,
                    fmt_size, build_rich_progress_card, friendly_error, safe_tg_call)
 from uploaders.smart_dest import smart_dest
 
-
-def _yt_proxy():
-    """Optional egress proxy for YouTube. Set YT_PROXY env (http://user:pass@host:port).
-    Empty value, 'off' or 'none' disables the proxy entirely."""
-    v = (os.environ.get('YT_PROXY') or '').strip()
-    if not v or v.lower() in ('off', 'none', 'disabled', '0', 'false'):
-        return None
-    return v
-
-
-def _yt_client_args(cf):
-    """Extractor args for YouTube depending on cookie availability.
-
-    Measured on Railway (2026-08): cookie+proxy with yt-dlp's DEFAULT client
-    selection yields up to 1080p; forcing tv_simply/web_safari/mweb DROPS it
-    to 360p. So when a cookie exists we do NOT override clients at all.
-    Without a cookie, tv_simply is the only client that dodges the bot-check
-    on flagged datacenter IPs."""
-    if cf:
-        return None  # no override — use yt-dlp defaults
-    return {'youtube': {'player_client': ['tv_simply']}}
-
-
 def _cancel_markup(cid=None):
     from telebot import types
     from locales import t
@@ -57,11 +34,6 @@ def get_format_sizes(url: str, cid=None) -> dict:
         'js_runtimes': {'deno': {}, 'node': {}},
     }
     if cf: opts['cookiefile'] = cf
-    else:
-        opts['extractor_args'] = _yt_client_args(None)
-        opts['nocheckcertificate'] = True
-    _px = _yt_proxy()
-    if _px: opts['proxy'] = _px
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -184,12 +156,7 @@ def _build_ydl_opts(task: dict, folder: str, hook) -> dict:
     cf = active_cookies_file(task.get('url', ''), cid)
     if cf:
         ydl_opts['cookiefile'] = cf
-    _ca = _yt_client_args(cf)
-    if _ca: ydl_opts['extractor_args'] = _ca
-    if not cf:
-        ydl_opts['nocheckcertificate'] = True
-    _px = _yt_proxy()
-    if _px: ydl_opts['proxy'] = _px
+
     return ydl_opts
 
 
@@ -360,13 +327,11 @@ def process_youtube_download(task):
             '_stop': task.get('_stop'),
             'user_id': cid,
         }
-        from config import gdrive_redirects
-        stashed = gdrive_redirects.get(cid) is not None and gdrive_redirects[cid].get('fp') == file_path
         smart_dest(file_path, msg, dest, folder_name=safe_title, task_info=task_info)
-        # Re-check after smart_dest: if it stashed the file for a pending
-        # Drive connection (gd not linked), the file must survive cleanup —
-        # the user will pick a new destination and the stash is uploaded then.
-        stashed = stashed or (gdrive_redirects.get(cid) is not None and gdrive_redirects[cid].get('fp') == file_path)
+        # If smart_dest stashed this file (Drive not connected — user will
+        # re-pick a destination), the file must survive cleanup.
+        from config import gdrive_redirects as _gr
+        stashed = _gr.get(cid, {}).get('fp') == file_path if isinstance(_gr.get(cid), dict) else False
         if not stashed:
             cleanup_path(folder)
 
@@ -386,11 +351,6 @@ def fetch_playlist_entries(url: str, cf=None) -> tuple:
         'js_runtimes': {'deno': {}, 'node': {}},
     }
     if cf: opts['cookiefile'] = cf
-    else:
-        opts['extractor_args'] = _yt_client_args(None)
-        opts['nocheckcertificate'] = True
-    _px = _yt_proxy()
-    if _px: opts['proxy'] = _px
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return list(info.get('entries', [])), info.get('title', 'playlist')
@@ -494,12 +454,6 @@ def process_playlist_download(task):
         if embed_chap and not audio_only:
             ydl_opts['embedchapters'] = True
         if cf: ydl_opts['cookiefile'] = cf
-        _ca = _yt_client_args(cf)
-        if _ca: ydl_opts['extractor_args'] = _ca
-        if not cf:
-            ydl_opts['nocheckcertificate'] = True
-        _px = _yt_proxy()
-        if _px: ydl_opts['proxy'] = _px
 
         fp = None
         try:
