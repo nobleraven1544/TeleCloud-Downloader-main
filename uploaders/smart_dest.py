@@ -29,9 +29,7 @@ def smart_dest(file_path: str, status_msg, dest: str = None, folder_name: str = 
         import db
         try:
             d = db.get_upload_dest(cid)
-            # 'ask' means the user wants to be asked per file — default to
-            # Telegram, never silently fall through to Drive.
-            dest = d if d in ('s3', 'github', 'gd') else 'tg'
+            dest = d if d in ('s3', 'github', 'gd') else None
         except Exception:
             dest = 'tg'
 
@@ -52,7 +50,7 @@ def smart_dest(file_path: str, status_msg, dest: str = None, folder_name: str = 
         upload_file_to_telegram(file_path, status_msg, task_info)
     elif dest == 's3':
         url = upload_to_s3(file_path, chat_id, status_msg)
-        _reply_link(status_msg, url, "S3/Railway", cid)
+        _reply_link(status_msg, url, "Direct Link", cid)
     elif dest == 'github':
         url = upload_to_github(file_path, chat_id, status_msg)
         _reply_link(status_msg, url, "GitHub", cid)

@@ -42,7 +42,9 @@ def _get_conn():
     if conn is None or is_closed:
         if USE_POSTGRES:
             _local.conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
-            _local.conn.autocommit = False
+            # autocommit=True avoids InFailedSqlTransaction: each statement is
+            # its own transaction, so a failed query cannot poison later ones.
+            _local.conn.autocommit = True
         else:
             _local.conn = sqlite3.connect("/app/user_configs/telecloud.db", check_same_thread=False)
             _local.conn.row_factory = sqlite3.Row
@@ -59,31 +61,56 @@ def _run(q: str, params: tuple = ()):
     with _db_lock:
         conn = _get_conn()
         cur = conn.cursor()
-        cur.execute(_sql(q), params)
-        conn.commit()
-        return cur
+        try:
+            cur.execute(_sql(q), params)
+            conn.commit()
+            return cur
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # connection may be poisoned; force a fresh one next time
+            _local.conn = None
+            raise
 
 
 def _fetchone(q: str, params: tuple = ()):
     with _db_lock:
         conn = _get_conn()
-        if USE_POSTGRES:
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        else:
-            cur = conn.cursor()
-        cur.execute(_sql(q), params)
-        return cur.fetchone()
+        try:
+            if USE_POSTGRES:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            else:
+                cur = conn.cursor()
+            cur.execute(_sql(q), params)
+            return cur.fetchone()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _local.conn = None
+            raise
 
 
 def _fetchall(q: str, params: tuple = ()):
     with _db_lock:
         conn = _get_conn()
-        if USE_POSTGRES:
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        else:
-            cur = conn.cursor()
-        cur.execute(_sql(q), params)
-        return cur.fetchall()
+        try:
+            if USE_POSTGRES:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            else:
+                cur = conn.cursor()
+            cur.execute(_sql(q), params)
+            return cur.fetchall()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _local.conn = None
+            raise
 
 
 def _ensure_users_columns(conn) -> None:
@@ -201,11 +228,12 @@ def init_db() -> None:
             )
             conn.commit()
             _ensure_users_columns(conn)
-            # Migration: legacy 'tg' default is retired — NULL means "ask per file".
+            # Migration: legacy 'tg' default is retired — 'ask' means "ask per file".
+            # Column is NOT NULL, so use 'ask' sentinel instead of NULL.
             try:
                 cur2 = conn.cursor()
                 cur2.execute(
-                    "UPDATE users SET upload_dest=NULL WHERE upload_dest='tg'")
+                    "UPDATE users SET upload_dest='ask' WHERE upload_dest='tg'")
                 conn.commit()
             except Exception:
                 pass
@@ -368,7 +396,7 @@ def set_github_repo(user_id: int, repo: str) -> None:
 
 
 def set_upload_dest(user_id: int, dest: str) -> None:
-    if dest not in ("tg", "s3", "github", "gd"):
+    if dest not in ("tg", "s3", "github", "gd", "ask"):
         dest = "tg"
     _run(
         "INSERT INTO users (user_id, upload_dest) VALUES (?, ?) "
@@ -378,10 +406,13 @@ def set_upload_dest(user_id: int, dest: str) -> None:
 
 
 def clear_upload_dest(user_id: int) -> None:
-    """Reset destination to per-file asking (NULL)."""
+    """Reset destination to per-file asking ('ask').
+
+    The column is NOT NULL, so we store the sentinel 'ask' instead of NULL.
+    """
     _run(
-        "INSERT INTO users (user_id, upload_dest) VALUES (?, NULL) "
-        "ON CONFLICT(user_id) DO UPDATE SET upload_dest=NULL",
+        "INSERT INTO users (user_id, upload_dest) VALUES (?, 'ask') "
+        "ON CONFLICT(user_id) DO UPDATE SET upload_dest='ask'",
         (user_id,),
     )
 
@@ -392,7 +423,7 @@ def get_upload_dest(user_id: int) -> str:
     if not row:
         return "ask"
     d = row["upload_dest"]
-    return d if d in ("gd", "s3", "github") else "ask"
+    return d if d in ("gd", "s3", "github", "tg") else "ask"
 
 
 def get_github_repo(user_id: int):
@@ -450,12 +481,12 @@ def adjust_user_monthly_quota_bytes(user_id: int, delta_bytes: int) -> int:
     from config import MAX_MONTHLY_BYTES
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute(_sql("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING"), (user_id,))
-    cur.execute(_sql("SELECT custom_quota_monthly_bytes FROM users WHERE user_id=?"), (user_id,))
+    cur.execute("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING", (user_id,))
+    cur.execute("SELECT custom_quota_monthly_bytes FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     base = int(row[0]) if row and row[0] is not None else int(MAX_MONTHLY_BYTES)
     new_bytes = max(0, base + int(delta_bytes))
-    cur.execute(_sql("UPDATE users SET custom_quota_monthly_bytes=? WHERE user_id=?"), (new_bytes, user_id))
+    cur.execute("UPDATE users SET custom_quota_monthly_bytes=? WHERE user_id=?", (new_bytes, user_id))
     conn.commit()
     return new_bytes
 
@@ -464,13 +495,13 @@ def adjust_user_usage_count(user_id: int, delta: int) -> int:
     conn = _get_conn()
     cur = conn.cursor()
     today = date.today().isoformat()
-    cur.execute(_sql("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING"), (user_id,))
-    cur.execute(_sql(
-        "UPDATE users SET files_downloaded=MAX(files_downloaded + ?, 0), last_active_date=? WHERE user_id=?"),
+    cur.execute("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING", (user_id,))
+    cur.execute(
+        "UPDATE users SET files_downloaded=MAX(files_downloaded + ?, 0), last_active_date=? WHERE user_id=?",
         (int(delta), today, user_id),
     )
     conn.commit()
-    cur.execute(_sql("SELECT files_downloaded FROM users WHERE user_id=?"), (user_id,))
+    cur.execute("SELECT files_downloaded FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     return int(row[0] if row else 0)
 
@@ -479,12 +510,12 @@ def adjust_user_quota_bytes(user_id: int, delta_bytes: int) -> int:
     from config import MAX_DAILY_BYTES
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute(_sql("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING"), (user_id,))
-    cur.execute(_sql("SELECT custom_quota_bytes FROM users WHERE user_id=?"), (user_id,))
+    cur.execute("INSERT INTO users (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING", (user_id,))
+    cur.execute("SELECT custom_quota_bytes FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     base = int(row[0]) if row and row[0] is not None else int(MAX_DAILY_BYTES)
     new_bytes = max(0, base + int(delta_bytes))
-    cur.execute(_sql("UPDATE users SET custom_quota_bytes=? WHERE user_id=?"), (new_bytes, user_id))
+    cur.execute("UPDATE users SET custom_quota_bytes=? WHERE user_id=?", (new_bytes, user_id))
     conn.commit()
     return new_bytes
 
@@ -520,19 +551,25 @@ def check_and_update_quota(user_id: int, file_size_bytes: int) -> tuple:
 
     row = get_user(user_id)
     if row is None:
-        cur.execute(_sql("INSERT INTO users (user_id) VALUES (?)"), (user_id,))
+        cur.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
         conn.commit()
         row = get_user(user_id)
 
     last_date = row["last_active_date"] or ""
     if last_date != today_str:
-        cur.execute(_sql("UPDATE users SET files_downloaded=0, bytes_downloaded=0, last_active_date=? WHERE user_id=?"), (today_str, user_id))
+        cur.execute(
+            "UPDATE users SET files_downloaded=0, bytes_downloaded=0, last_active_date=? WHERE user_id=?",
+            (today_str, user_id),
+        )
         conn.commit()
         row = get_user(user_id)
 
     last_month = row["last_active_month"] or ""
     if last_month != month_str:
-        cur.execute(_sql("UPDATE users SET monthly_files_downloaded=0, monthly_bytes_downloaded=0, last_active_month=? WHERE user_id=?"), (month_str, user_id))
+        cur.execute(
+            "UPDATE users SET monthly_files_downloaded=0, monthly_bytes_downloaded=0, last_active_month=? WHERE user_id=?",
+            (month_str, user_id),
+        )
         conn.commit()
         row = get_user(user_id)
 
@@ -560,11 +597,14 @@ def check_and_update_quota(user_id: int, file_size_bytes: int) -> tuple:
     if monthly_bytes_used + file_size_bytes > max_monthly_bytes:
         return False, t(user_id, 'quota_monthly_bytes_exceeded', used=fmt_size(monthly_bytes_used), max=fmt_size(max_monthly_bytes))
 
-    cur.execute(_sql("UPDATE users SET files_downloaded=files_downloaded+1, "
+    cur.execute(
+        "UPDATE users SET files_downloaded=files_downloaded+1, "
         "bytes_downloaded=bytes_downloaded+?, last_active_date=?, "
         "monthly_files_downloaded=monthly_files_downloaded+1, "
         "monthly_bytes_downloaded=monthly_bytes_downloaded+?, last_active_month=? "
-        "WHERE user_id=?"), (file_size_bytes, today_str, file_size_bytes, month_str, user_id))
+        "WHERE user_id=?",
+        (file_size_bytes, today_str, file_size_bytes, month_str, user_id),
+    )
     conn.commit()
     return True, ""
 

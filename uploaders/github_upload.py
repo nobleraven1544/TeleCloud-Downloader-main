@@ -170,7 +170,7 @@ def upload_to_github(file_path: str, user_id: int, status_msg=None) -> str | Non
                     f"https://github.com/{repo}/blob/{gh_branch}/"
                     f"uploads/{user_id}/{fname}\n\n"
                     "🔒 این ریپو خصوصی است — برای دانلود باید با اکانت گیت‌هاب "
-                    "خودت (همونی که توکنش رو دادی) لاگین باشی.")
+                    "خودت (همونی که توکنش رو دادی) وارد بشی.")
 
         # Large file → split into parts, upload each as its own blob
         n_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -205,7 +205,7 @@ def upload_to_github(file_path: str, user_id: int, status_msg=None) -> str | Non
                 f"📋 manifest:\nhttps://github.com/{repo}/blob/{gh_branch}/"
                 f"uploads/{user_id}/{fname}.manifest.json\n\n"
                 "🔒 ریپو خصوصی است — برای دانلود با اکانت گیت‌هاب خودت "
-                "(همونی که توکنش رو دادی) لاگین باش.\n"
+                "(همونی که توکنش رو دادی) وارد بشی.\n"
                 "🧩 برای ساخت دوبارهٔ فایل اصلی، همهٔ part ها را به ترتیب به هم بچسبان.")
     except Exception as e:
         print(f"[github] upload failed for user {user_id}: {e}")

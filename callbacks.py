@@ -207,7 +207,7 @@ def callback_query(call):
                 toast = 'مقصد آپلود: Google Drive'
             elif current == 'gd':
                 db.set_upload_dest(cid, 's3')
-                toast = 'مقصد آپلود: Railway S3'
+                toast = 'مقصد آپلود: Direct Link'
             elif current == 's3':
                 db.set_upload_dest(cid, 'github')
                 toast = 'مقصد آپلود: GitHub شخصی'
@@ -265,6 +265,29 @@ def callback_query(call):
             _handle_gdrive_settings(call, cid)
             return
 
+        elif action == "github":
+            # GitHub connection: ask for token, then repo (two-step chat flow)
+            bot.answer_callback_query(call.id)
+            import db
+            tok = db.get_github_token(cid)
+            repo = db.get_github_repo(cid)
+            if tok and repo:
+                bot.send_message(
+                    cid,
+                    f"✅ GitHub وصل شده:\nrepo: {repo}\n\n"
+                    "برای تغییر، توکن جدید بفرست به شکل:\n"
+                    "/setgithub <TOKEN> <owner/repo>")
+            else:
+                config.pending_github_setup[cid] = True
+                bot.send_message(
+                    cid,
+                    "🐱 اتصال GitHub — کافیه توکن بفرستی:\n"
+                    "/setgithub <TOKEN>\n"
+                    "(Personal Access Token با اجازهٔ repo)\n\n"
+                    "خودکار: نام کاربری‌ات گرفته می‌شه، ریپوی خصوصی "
+                    "telecloud-uploads ساخته می‌شه و لینک‌ها به همون آپلود می‌شن.")
+            return
+
         elif action == "profile":
             # Show the user's daily quota stats (helper lives in handlers.py)
             bot.answer_callback_query(call.id)
@@ -274,9 +297,10 @@ def callback_query(call):
 
         elif action.startswith("dest|"):
             # Explicit destination pick: dest|tg / dest|gd / dest|s3 / dest|github
+            # / dest|ask (ask per file)
             from config import pending_uploads
             choice = action.split("|", 1)[1]
-            if choice not in ("tg", "gd", "s3", "github"):
+            if choice not in ("tg", "gd", "s3", "github", "ask"):
                 bot.answer_callback_query(call.id)
                 return
 
@@ -285,6 +309,18 @@ def callback_query(call):
             if pend:
                 fp = pend['fp']
                 status_msg_id = pend['status_msg_id']
+                if choice == 'ask':
+                    # user picked "ask" with a pending file: just set default and
+                    # re-open the picker so they can pick a concrete destination
+                    bot.answer_callback_query(call.id, "برای این فایل مقصد را انتخاب کنید")
+                    from menu import destination_pick_markup
+                    try:
+                        bot.edit_message_reply_markup(
+                            cid, call.message.message_id,
+                            reply_markup=destination_pick_markup(cid))
+                    except Exception:
+                        pass
+                    return
                 bot.answer_callback_query(call.id, f"آپلود به: {choice}")
                 try:
                     bot.delete_message(cid, call.message.message_id)
@@ -302,7 +338,8 @@ def callback_query(call):
 
             # Case B: no pending file — just set default destination
             db.set_upload_dest(cid, choice)
-            bot.answer_callback_query(call.id, f"مقصد پیش‌فرض تنظیم شد: {choice}")
+            label = "پرسیده شود (هر فایل)" if choice == 'ask' else choice
+            bot.answer_callback_query(call.id, f"مقصد پیش‌فرض تنظیم شد: {label}")
             from menu import destination_pick_markup
             try:
                 bot.edit_message_reply_markup(
@@ -587,7 +624,9 @@ def callback_query(call):
 
     # ── Direct link destination ───────────────────────────────
     if data.startswith("dl|"):
-        _, dest, mid = data.split('|', 2)
+        # callback_data is built as f"{prefix}|{key}" with prefix=f"dl|{mid}",
+        # so the layout is dl|<mid>|<dest>.
+        _, mid, dest = data.split('|', 2)
         with cache_lock:
             url = url_cache.get((cid, int(mid)))
         if not url:
@@ -708,8 +747,8 @@ def _handle_dest_pick(call, cid, data):
     if redir:
         gdrive_redirects[cid] = redir  # 'gd' picked again — keep stash
     if choice == "ask":
-        # Reset to per-file asking (no stored default).
-        _db.clear_upload_dest(cid)
+        # Reset to per-file asking (store 'ask' explicitly; column is NOT NULL).
+        _db.set_upload_dest(cid, 'ask')
         bot.answer_callback_query(call.id, "هر فایل مقصد پرسیده میشه")
         from menu import destination_pick_markup
         try:
@@ -869,14 +908,7 @@ def _handle_yt_quality(call, cid, data):
             return
         fmt, audio_only = YT_FMT_MAP[quality]
         try:
-            from downloaders.youtube import _yt_proxy
-            import cookies as _ck
-            _opts = {'quiet': True, 'skip_download': True}
-            _cf = _ck.active_cookies_file(url, cid)
-            if _cf: _opts['cookiefile'] = _cf
-            _px = _yt_proxy()
-            if _px: _opts['proxy'] = _px
-            with yt_dlp.YoutubeDL(_opts) as ydl:
+            with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
                 info  = ydl.extract_info(url, download=False)
                 title = info.get('title', 'video')
         except Exception:
@@ -935,14 +967,7 @@ def _handle_yt_dest(call, cid, data):
         return
     fmt, audio_only = YT_FMT_MAP[quality]
     try:
-        from downloaders.youtube import _yt_proxy
-        import cookies as _ck
-        _opts = {'quiet': True, 'skip_download': True}
-        _cf = _ck.active_cookies_file(url, cid)
-        if _cf: _opts['cookiefile'] = _cf
-        _px = _yt_proxy()
-        if _px: _opts['proxy'] = _px
-        with yt_dlp.YoutubeDL(_opts) as ydl:
+        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
             info  = ydl.extract_info(url, download=False)
             title = info.get('title', 'video')
     except Exception:

@@ -76,30 +76,36 @@ _SUBTITLE_LOCALE = {
 # =============================================================
 
 def get_dest(cid) -> str:
-    """Return the user's default upload destination (db-saved, then runtime sets)."""
-    import db as _db
+    """User's default destination. gd without connected Drive falls back to ask."""
+    import db
+    from pathlib import Path
+    from config import USER_CONFIGS_DIR
     try:
-        d = _db.get_upload_dest(cid)
-        if d in ('tg', 'gd', 's3', 'github'):
-            return d
+        d = db.get_upload_dest(cid)
+        if d == 'gd' and cid and not Path(USER_CONFIGS_DIR, f"rclone_{cid}.conf").exists():
+            return 'ask'
+        return d if d in ('gd', 's3', 'github', 'tg') else 'ask'
     except Exception:
-        pass
-    if cid in config.tg_upload_mode:
-        return 'tg'
-    if cid in config.gd_upload_mode:
-        return 'gd'
-    return None
+        return 'ask'
+
+
+def has_drive(cid) -> bool:
+    import os
+    from pathlib import Path
+    from config import USER_CONFIGS_DIR
+    return bool(cid) and Path(USER_CONFIGS_DIR, f"rclone_{cid}.conf").exists()
 
 
 def should_ask_dest(cid) -> bool:
-    """Return True if the user has not yet chosen a destination."""
-    import db as _db
+    """Return True if the user has never explicitly chosen a destination."""
+    import db
     try:
-        if _db.get_upload_dest(cid) in ('tg', 'gd', 's3', 'github'):
-            return False
+        row = db.get_user(cid)
+        d = row["upload_dest"]
+        # NULL/absent OR explicit 'ask' = prompt the user each time
+        return not d or d == 'ask'
     except Exception:
-        pass
-    return cid not in config.tg_upload_mode and cid not in config.gd_upload_mode
+        return True
 
 
 # =============================================================

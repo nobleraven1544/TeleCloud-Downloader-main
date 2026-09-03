@@ -22,7 +22,7 @@ from dest_helpers import (get_dest, should_ask_dest, get_quality,
                           get_quality_label, is_audio_mode, get_audio_mode_label,
                           get_audio_format, get_audio_quality, get_video_format,
                           get_subtitle, get_chapters)
-from downloaders.youtube import get_format_sizes, _yt_proxy as _handlers_yt_proxy, _yt_client_args
+from downloaders.youtube import get_format_sizes
 from uploaders.gdrive_upload import upload_file_to_gdrive_folder
 from downloaders.social import _is_ytdlp_url
 from locales import t
@@ -93,6 +93,44 @@ YT_LABELS = {
     '1080': '1080p', '720': '720p', '480': '480p',
     'best': '⭐ بهترین',
 }
+
+
+def _safe_extract(url: str, opts: dict, cid=None):
+    """yt-dlp extract_info with automatic bot-check workarounds.
+
+    Tries multiple player clients because YouTube frequently blocks
+    datacenter IPs. Order matters: tv_simply/web are most resilient.
+    Returns {} never None.
+    """
+    import os as _os
+    _px = _os.environ.get('YT_PROXY', '').strip()
+    if _px and 'proxy' not in opts:
+        opts['proxy'] = _px
+
+    # Base attempt
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info or {}
+    except Exception as e:
+        s = str(e).lower()
+        if 'sign in to confirm' in s or 'not a bot' in s or 'bot check' in s:
+            clients = ['tv_simply', 'web', 'web_safari', 'android', 'ios']
+            last_err = e
+            for client in clients:
+                o2 = dict(opts)
+                ea = o2.setdefault('extractor_args', {}).setdefault('youtube', {})
+                ea['player_client'] = [client]
+                try:
+                    with yt_dlp.YoutubeDL(o2) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        return info or {}
+                except Exception as e2:
+                    last_err = e2
+                    continue
+            raise last_err
+        raise
+
 
 # Tracks pending join requests to avoid duplicate admin notifications
 _pending_join_requests: set = set()
@@ -341,22 +379,87 @@ def cmd_togglereg(message):
 # =============================================================
 # Per-user GitHub upload config: /setgithub <TOKEN> <owner/repo>
 # =============================================================
+def _github_ensure_repo(token: str, cid: int):
+    """Validate token, get the login name, ensure an upload repo exists.
+
+    Returns (owner/name, error_message). Only one of the two is set.
+    """
+    import requests as _rq
+    hdr = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = _rq.get("https://api.github.com/user", headers=hdr, timeout=20)
+    except Exception as e:
+        return None, f"اتصال به گیت‌هاب برقرار نشد: {e}"
+    if r.status_code == 401:
+        return None, "توکن نامعتبره یا منقضی شده. یه Personal Access Token تازه با اجازهٔ repo بساز."
+    if r.status_code != 200:
+        return None, f"گیت‌هاب پاسخ غیرمنتظره داد ({r.status_code})."
+    login = r.json().get("login")
+    if not login:
+        return None, "نتونستم نام کاربری گیت‌هاب رو از توکن دربیارم."
+
+    repo_name = "telecloud-uploads"
+    full = f"{login}/{repo_name}"
+    chk = _rq.get(f"https://api.github.com/repos/{full}", headers=hdr, timeout=20)
+    if chk.status_code == 200:
+        if not chk.json().get("permissions", {}).get("push"):
+            return None, f"به ریپوی {full} دسترسی نوشتن نداری."
+        return full, None
+    if chk.status_code != 404:
+        return None, f"بررسی ریپو ناموفق بود ({chk.status_code})."
+
+    # Create the private upload repo
+    cr = _rq.post("https://api.github.com/user/repos",
+                  headers=hdr, timeout=30,
+                  json={"name": repo_name, "private": True,
+                        "description": "TeleCloud-Downloader uploads",
+                        "auto_init": True})
+    if cr.status_code not in (201, 202):
+        msg = ""
+        try:
+            errs = cr.json().get("errors") or []
+            msg = "; ".join(e.get("message", "") for e in errs if isinstance(e, dict))
+        except Exception:
+            pass
+        if cr.status_code == 422 or "already exists" in msg:
+            # exists but hidden from /user/repos check — try again
+            chk2 = _rq.get(f"https://api.github.com/repos/{full}", headers=hdr, timeout=20)
+            if chk2.status_code == 200:
+                return full, None
+        return None, f"ساخت ریپو ناموفق بود ({cr.status_code}): {msg or 'دسترسی کافی نیست'}"
+    return full, None
+
+
 @bot.message_handler(commands=['setgithub'])
 def cmd_setgithub(message):
     cid = message.chat.id
     parts = message.text.split()
-    if len(parts) < 3:
+
+    # New flow: just the token — the bot derives the username and creates
+    # a private uploads repo automatically.
+    if len(parts) == 2:
+        token = parts[1].strip()
+        wait = bot.reply_to(message, "⏳ در حال بررسی توکن و آماده‌سازی ریپو...")
+        full, err = _github_ensure_repo(token, cid)
+        try:
+            bot.delete_message(cid, wait.message_id)
+        except Exception:
+            pass
+        if err:
+            bot.reply_to(message, f"❌ {err}")
+            return
+        db.set_github_token(cid, token)
+        db.set_github_repo(cid, full)
         bot.reply_to(message,
-                     "استفاده:\n/setgithub <TOKEN> <owner/repo>\nمثال:\n/setgithub ghp_xxx amirh00sain/myuploads")
+                     f"✅ GitHub وصل شد:\nrepo: {full}\n"
+                     "(ریپوی خصوصی ساخته شد — لینک‌ها فقط با اکانت خودت باز می‌شن)")
         return
-    token = parts[1].strip()
-    repo = parts[2].strip()
-    if '/' not in repo:
-        bot.reply_to(message, "ریپو باید به فرم owner/repo باشه")
-        return
-    db.set_github_token(cid, token)
-    db.set_github_repo(cid, repo)
-    bot.reply_to(message, f"توکن GitHub و ریپو ست شد:\n repo: {repo}\nحالا مقصد رو روی GitHub بذار (تنظیمات → Upload)")
+
+    # Token with explicit owner/repo is no longer supported — token only.
+    bot.reply_to(message,
+                 "استفاده:\n/setgithub <TOKEN>\n"
+                 "کافیه فقط توکن (Personal Access Token با اجازهٔ repo) رو بفرستی؛ "
+                 "ریپوی خصوصی uploads خودکار ساخته می‌شه.")
 
 
 # =============================================================
@@ -696,6 +799,16 @@ def handle_text(message):
     if _handle_menu(cid, text, message):
         return
 
+    # Unknown slash-command (e.g. /help, /foo) → show help instead of "unrecognized link"
+    if text.startswith('/'):
+        bot.send_message(cid, _build_help_text(cid), reply_markup=main_menu_markup(cid))
+        return
+
+    # Plain text that is not a link/menu/command → friendly hint (not "unrecognized link")
+    if not text.startswith(("http://", "https://", "magnet:")):
+        bot.send_message(cid, t(cid, 'send_link_hint'), reply_markup=main_menu_markup(cid))
+        return
+
     if text.startswith(("http://", "https://")):
         text = clean_url(text)
 
@@ -707,7 +820,10 @@ def handle_text(message):
 # =============================================================
 def _handle_menu(cid, text, message) -> bool:
     # Collect both FA and EN button labels so either language works
-    if text in (t(cid, 'btn_settings'), "تنظیمات ⚙️", "Settings ⚙️"):
+    # Accept both icon orders (e.g. "تنظیمات ⚙️" and "⚙️ تنظیمات")
+    _settings_labels = (t(cid, 'btn_settings'), "تنظیمات ⚙️", "⚙️ تنظیمات",
+                        "Settings ⚙️", "⚙️ Settings")
+    if text in _settings_labels:
         from menu import settings_inline_markup
         user_state[cid] = None
         bot.send_message(cid, t(cid, 'settings_panel_title'),
@@ -715,7 +831,9 @@ def _handle_menu(cid, text, message) -> bool:
         return True
 
     # ── Profile button ────────────────────────────────────────
-    if text in (t(cid, 'btn_profile'), "👤 پروفایل من", "👤 My Profile"):
+    _profile_labels = (t(cid, 'btn_profile'), "👤 پروفایل من", "👤 My Profile",
+                       "پروفایل من 👤", "My Profile 👤")
+    if text in _profile_labels:
         _send_profile_stats(cid)
         return True
 
@@ -940,18 +1058,8 @@ def _handle_youtube_link(message, cid, text):
     cf   = active_cookies_file(text, cid)
     if cf:
         opts['cookiefile'] = cf
-    _px = _handlers_yt_proxy()
-    if _px: opts['proxy'] = _px
-    _ea = _yt_client_args(cf)
-    if _ea: opts['extractor_args'] = _ea
+    info = _safe_extract(text, opts, cid)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(text, download=False)
-
-        if not info:
-            bot.edit_message_text(t(cid, 'unknown_link'), cid, msg.message_id)
-            return
-
         unknown = t(cid, 'unknown_title')
 
         if 'entries' in info:
@@ -1154,24 +1262,14 @@ def _handle_soundcloud_playlist(message, cid, text):
     opts = {'extract_flat': True, 'quiet': True}
     if cf:
         opts['cookiefile'] = cf
-    _px = _handlers_yt_proxy()
-    if _px: opts['proxy'] = _px
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(text, download=False)
+        info = _safe_extract(text, opts, cid)
     except Exception as e:
         try:
             bot.edit_message_text(
                 t(cid, 'sc_playlist_fetch_error', error=friendly_error(str(e), cid=cid)),
                 cid, msg.message_id)
-        except Exception:
-            pass
-        return
-
-    if not info:
-        try:
-            bot.edit_message_text(t(cid, 'unknown_link'), cid, msg.message_id)
         except Exception:
             pass
         return
@@ -1352,14 +1450,8 @@ def _handle_social_link(message, cid, text):
         opts = {'quiet': True, 'skip_download': True, 'noplaylist': _url_is_playlist(text), 'js_runtimes': {'deno': {}, 'node': {}}}
         if cf:
             opts['cookiefile'] = cf
-        _px = _handlers_yt_proxy()
-        if _px: opts['proxy'] = _px
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(text, download=False)
-            if not info:
-                bot.reply_to(message, t(cid, 'unknown_link'))
-                return
+            info = _safe_extract(text, opts, cid)
             title   = info.get('title', domain)[:40]
             formats = info.get('formats', [])
             seen_h     = set()

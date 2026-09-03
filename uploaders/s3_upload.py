@@ -7,16 +7,14 @@ a presigned GET URL (valid 7 days). This works regardless of bucket privacy.
 """
 
 import os
-import time
 import base64
 import secrets
 import boto3
 from urllib.parse import quote
-AWS_ENDPOINT_URL       = os.environ.get('AWS_ENDPOINT_URL', '')
-AWS_ACCESS_KEY_ID      = os.environ.get('AWS_ACCESS_KEY_ID', '')
-AWS_SECRET_ACCESS_KEY  = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
-AWS_DEFAULT_REGION     = os.environ.get('AWS_DEFAULT_REGION', 'auto')
-AWS_BUCKET_NAME        = os.environ.get('AWS_BUCKET_NAME', '')
+from config import (
+    AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+    AWS_DEFAULT_REGION, AWS_BUCKET_NAME,
+)
 
 
 def _client():
@@ -73,75 +71,32 @@ def upload_to_s3(file_path: str, chat_id: int, status_msg=None) -> str | None:
     client = _client()
     _evict_oldest_if_full(client, os.path.getsize(file_path))
 
-    # Optional per-file password: if the user set one (/setpass), register a
-    # PBKDF2 hash for this object key BEFORE uploading so the /files proxy
-    # gates it. Import here to avoid circulars; failures are non-fatal.
-    try:
-        import file_passwords
-        from handlers import get_pending_password
-        pwd = get_pending_password(chat_id)
-        if pwd:
-            file_passwords.set_password(key, chat_id, pwd)
-    except Exception as _pe:
-        print(f"[s3] password gate skipped: {_pe}")
-
     # SSE-C: server-side encryption with a customer-provided per-file key.
     file_key = secrets.token_bytes(32)
     key_md5 = base64.b64encode(__import__('hashlib').md5(file_key).digest()).decode()
-
-    # Live progress card: size, %, speed, ETA, elapsed — edited into status_msg
-    total_bytes = os.path.getsize(file_path)
-    up_start = time.time()
-    last_edit = [0.0]
-    from config import bot as _tg_bot
-
-    def _s3_progress(n):
-        import time as _t
-        from utils import build_rich_progress_card, safe_tg_call
-        now = _t.time()
-        if now - last_edit[0] < 3 and n < total_bytes:
-            return
-        last_edit[0] = now
-        done = min(n, total_bytes)
-        pct = done / total_bytes * 100 if total_bytes else 100
-        elapsed = max(now - up_start, 0.001)
-        speed = done / elapsed
-        eta = int((total_bytes - done) / speed) if speed > 0 else 0
-        try:
-            card = build_rich_progress_card(
-                "🪣", fname, pct, done, total_bytes, speed, eta,
-                "Direct link", "", cid=chat_id, started_at=up_start)
-            safe_tg_call(_tg_bot.edit_message_text, card,
-                         status_msg.chat.id, status_msg.message_id)
-        except Exception:
-            pass
-
     try:
         client.upload_file(
             file_path, AWS_BUCKET_NAME, key,
-            Callback=_s3_progress,
             ExtraArgs={'SSECustomerAlgorithm': 'AES256',
                        'SSECustomerKey': base64.b64encode(file_key).decode(),
                        'SSECustomerKeyMD5': key_md5})
     except Exception as e:
         print(f"[s3] encrypted upload failed ({type(e).__name__}), falling back to plain: {e}")
         try:
-            client.upload_file(file_path, AWS_BUCKET_NAME, key,
-                               Callback=_s3_progress)
+            client.upload_file(file_path, AWS_BUCKET_NAME, key)
         except Exception as e2:
             print(f"[s3] upload failed: {e2}")
             return None
         file_key = None  # stored unencrypted
 
-    # Custom public domain (PUBLIC_BASE_URL) → permanent pretty link via our
-    # own proxy (which also enforces the optional per-file password).
+    # Custom public domain (PUBLIC_BASE_URL) → permanent pretty link.
     # Fallback: presigned URL (7 days), works regardless of bucket privacy.
     base = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
     frag = f"#k={base64.urlsafe_b64encode(file_key).decode()}" if file_key else ""
 
-    # Presigned URL (7 days) — works regardless of bucket privacy. S3 signatures
-    # only cover the Host header, so we can rewrite t3.storageapi.dev to
-    # PUBLIC_BASE_URL and serve through our own proxy (bypasses Iran filtering).
+    # Presigned URL (7 days) — S3 signatures only cover the Host header, so we
+    # can rewrite t3.storageapi.dev to PUBLIC_BASE_URL and serve through our
+    # own proxy (bypasses Iran filtering).
     try:
         url = client.generate_presigned_url(
             "get_object",
@@ -158,16 +113,6 @@ def upload_to_s3(file_path: str, chat_id: int, status_msg=None) -> str | None:
         print(f"[s3] presign failed: {e}")
     if base:
         return f"{base}/files/{chat_id}/{quote(fname)}{frag}"
-
-    # No PUBLIC_BASE_URL: if a password is set we MUST serve through the proxy
-    # or the password gate would be meaningless — build the link from the
-    # bot's own public domain instead of a presigned URL.
-    import file_passwords
-    if file_passwords.get_password(key):
-        import os as _os
-        dom = _os.environ.get('RAILWAY_PUBLIC_DOMAIN', '').strip()
-        if dom:
-            return f"https://{dom}/files/{chat_id}/{quote(fname)}{frag}"
 
     try:
         url = client.generate_presigned_url(

@@ -1,5 +1,6 @@
 import os
 import re
+import secrets
 import glob
 import time
 import logging
@@ -15,23 +16,6 @@ from cookies import active_cookies_file
 from utils import (check_disk_space, get_free_space, cleanup_path,
                    fmt_size, build_rich_progress_card, friendly_error, safe_tg_call)
 from uploaders.smart_dest import smart_dest
-
-
-def _yt_proxy():
-    """Optional egress proxy for YouTube. Set YT_PROXY env (http://user:pass@host:port).
-    Empty value, 'off' or 'none' disables the proxy entirely."""
-    v = (os.environ.get('YT_PROXY') or '').strip()
-    if not v or v.lower() in ('off', 'none', 'disabled', '0', 'false'):
-        return None
-    return v
-
-
-def _yt_client_args(cf):
-    """Extractor args for YouTube depending on cookie availability."""
-    if cf:
-        return {'youtube': {'player_client': ['tv_simply', 'web_safari', 'mweb']}}
-    return {'youtube': {'player_client': ['tv_simply']}}
-
 
 def _cancel_markup(cid=None):
     from telebot import types
@@ -51,21 +35,64 @@ def get_format_sizes(url: str, cid=None) -> dict:
         'js_runtimes': {'deno': {}, 'node': {}},
     }
     if cf: opts['cookiefile'] = cf
+    _px = os.environ.get('YT_PROXY', '').strip()
+    if _px: opts['proxy'] = _px
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as _be:
+            if 'sign in to confirm' in str(_be).lower() or 'not a bot' in str(_be).lower():
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            else:
+                raise
         formats = info.get('formats', [])
+
+        duration = info.get('duration') or 0
+
+        def _sz(f):
+            if not f:
+                return 0
+            v = f.get('filesize') or f.get('filesize_approx')
+            if v:
+                return v
+            # HLS/DASH manifests often omit filesize — estimate from bitrate.
+            tbr = f.get('tbr') or f.get('vbr') or (f.get('abr') or 0)
+            if tbr and duration:
+                return int(tbr * 1000 / 8 * duration)
+            return 0
+
+        auds = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+        best_aud = max(auds, key=lambda f: (f.get('abr') or 0)) if auds else None
+        a_sz = _sz(best_aud)
+
         for h in (1080, 720, 480):
-            vf = next((f for f in reversed(formats) if f.get('height') == h and f.get('ext') == 'mp4'), None)
-            af = next((f for f in reversed(formats) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('ext') == 'm4a'), None)
-            if vf:
-                vs       = vf.get('filesize') or vf.get('filesize_approx') or 0
-                as_      = (af.get('filesize') or af.get('filesize_approx') or 0) if af else 0
-                sizes[h] = vs + as_
-        bf = next((f for f in reversed(formats) if f.get('vcodec') != 'none' and f.get('acodec') != 'none'), None)
-        if bf: sizes['best'] = bf.get('filesize') or bf.get('filesize_approx') or 0
-        af = next((f for f in reversed(formats) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
-        if af: sizes['audio'] = af.get('filesize') or af.get('filesize_approx') or 0
+            vids = [f for f in formats if f.get('height') == h and f.get('vcodec') != 'none' and f.get('acodec') == 'none']
+            if not vids:
+                continue
+            # prefer mp4 container when available (matches YT_FMT_MAP preference)
+            vf = next((f for f in reversed(vids) if f.get('ext') == 'mp4'), vids[-1])
+            # +6% mux/container overhead so the menu size matches the delivered file
+            sizes[h] = int((_sz(vf) + a_sz) * 1.06)
+
+        # 'best' must reflect the true bestvideo+bestaudio combination — the
+        # old code picked the last progressive (video+audio) format, which is
+        # usually a low-res 360p stream and showed a wrong (tiny) size.
+        bvids = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
+        if bvids:
+            max_h = max((f.get('height') or f.get('width') or 0) for f in bvids)
+            top = [f for f in bvids if (f.get('height') or f.get('width') or 0) == max_h]
+            # among same-height variants prefer one with an exact filesize so the
+            # displayed size matches what will actually download.
+            bv = next((f for f in top if f.get('filesize') or f.get('filesize_approx')), top[0])
+            sizes['best'] = _sz(bv) + a_sz
+        elif best_aud is not None:
+            sizes['best'] = a_sz
+
+        if best_aud is not None:
+            sizes['audio'] = a_sz
     except Exception:
         pass
     return sizes
@@ -149,12 +176,31 @@ def _build_ydl_opts(task: dict, folder: str, hook) -> dict:
     if subtitle_lang != 'off' and not audio_only and merge_fmt not in ('mp4', 'mkv'):
         merge_fmt = 'mp4'  # silently coerce to mp4 so FFmpegEmbedSubtitle has a chance
 
+    dl_format = task['format']
+    if not audio_only and merge_fmt == 'mkv':
+        # Root-cause fix for "set MKV but receive MP4": merge_output_format only
+        # applies when yt-dlp actually MERGES two streams. When the requested
+        # format string prefers [ext=mp4] video + [ext=m4a] audio and a single
+        # progressive mp4 matches, no merge happens and the file stays .mp4.
+        # For MKV we strip the container preference so two streams are always
+        # selected and ffmpeg remuxes them into .mkv as requested.
+        import re as _re
+        stripped = _re.sub(r'\[ext=(mp4|m4a|webm)\]', '', dl_format)
+        if '[' not in stripped.split('/')[-1] and '/' not in stripped:
+            stripped = stripped + '/best'
+        dl_format = stripped
+        # ensure a merge actually happens (two separate streams)
+        if '+' not in dl_format:
+            dl_format = 'bestvideo+bestaudio/best'
+
     ydl_opts = {
-        'format':              task['format'],
+        'format':              dl_format,
         'outtmpl':             os.path.join(folder, '%(title)s.%(ext)s'),
         'progress_hooks':      [hook],
         'noplaylist':          True,
         'merge_output_format': merge_fmt,
+        **({'proxy': os.environ['YT_PROXY'].strip()}
+           if os.environ.get('YT_PROXY', '').strip() else {}),
         'postprocessors':      postprocessors,
         'writethumbnail':      audio_only,
         'quiet':               True,
@@ -242,7 +288,11 @@ def process_youtube_download(task):
             last_upd[0] = time.time()
 
     safe_title = re.sub(r'[\\/*?:"<>|]', '_', title_kw)[:50]
-    folder     = os.path.join(DOWNLOAD_DIR, safe_title)
+    # Unique per-task folder: two downloads of the same video (retries, parallel
+    # users) previously shared one folder and their cleanups deleted each
+    # other's files mid-upload.
+    folder     = os.path.join(
+        DOWNLOAD_DIR, f"{safe_title}_{secrets.token_hex(4)}")
     os.makedirs(folder, exist_ok=True)
     task['_active_path'] = folder
 
@@ -250,20 +300,60 @@ def process_youtube_download(task):
     file_path = None
     subtitle_warning = ''
 
+    def _is_bot_check(err: Exception) -> bool:
+        s = str(err).lower()
+        return 'sign in to confirm' in s or 'not a bot' in s
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info     = ydl.extract_info(task['url'], download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(task['url'], download=True)
+        except Exception as first_err:
+            if not _is_bot_check(first_err):
+                raise
+            # Retry with tv_simply client — usually bypasses the bot-check
+            # without cookies (formats may be limited but download works).
+            print('[youtube] bot-check hit, retrying with tv_simply', flush=True)
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2['extractor_args'] = {'youtube': {'player_client': ['tv_simply']}}
+            with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(task['url'], download=True)
+
+        if info is None:
+            raise Exception(t(cid, 'file_not_found_err'))
+
+        # ── Result discovery: prefer yt-dlp's own record of the final file.
+        # requested_downloads carries the ACTUAL post-merge filepath;
+        # prepare_filename() only guesses from the requested format and can
+        # miss merged/remuxed outputs entirely.
+        file_path = None
+        rd = info.get('requested_downloads') or []
+        for entry in rd:
+            fp = entry.get('filepath') or entry.get('_filename')
+            if fp and os.path.isfile(fp):
+                file_path = fp
+                break
+        if not file_path:
             expected = ydl.prepare_filename(info)
             base     = os.path.splitext(expected)[0]
-
-            # For audio: yt-dlp changes the extension after FFmpegExtractAudio
             candidates = glob.glob(base + '.*')
-            file_path  = max(candidates, key=os.path.getmtime) if candidates else None
-            if not file_path:
-                files     = sorted(glob.glob(os.path.join(folder, '*')), key=os.path.getmtime)
-                file_path = files[-1] if files else None
-            if not file_path:
-                raise Exception(t(cid, 'file_not_found_err'))
+            _vf = task.get('video_format', 'mp4')
+            _mf = _vf if _vf != 'default' else 'mp4'
+            if not audio_only and _mf != 'default':
+                pref = [c for c in candidates if c.lower().endswith('.' + _mf)]
+                if pref:
+                    candidates = pref
+            if candidates:
+                file_path = max(candidates, key=os.path.getmtime)
+        if not file_path:
+            files = [f for f in sorted(glob.glob(os.path.join(folder, '*')), key=os.path.getmtime)
+                     if os.path.isfile(f)]
+            file_path = files[-1] if files else None
+        if not file_path or not os.path.isfile(file_path):
+            logger.error("[discovery] no output; folder=%s contents=%s keys=%s",
+                         folder, os.listdir(folder), list(info.keys())[:15])
+            raise Exception(t(cid, 'file_not_found_err'))
+        task['_active_file'] = file_path
 
         # ── Task 4 fallback: check if subtitle was actually found ──
         if subtitle_lang != 'off' and not audio_only:
@@ -274,7 +364,7 @@ def process_youtube_download(task):
         except Exception: pass
 
         # ── Byte quota accounting ──────────────────────────────
-        real_size = os.path.getsize(file_path) if os.path.isfile(file_path) else 0
+        real_size = os.path.getsize(file_path) if (file_path and os.path.isfile(file_path)) else 0
         db.record_download_bytes(cid, real_size)
 
         final_title = task.get('actual_title', title_kw)
@@ -344,6 +434,10 @@ def process_youtube_download(task):
             '_stop': task.get('_stop'),
             'user_id': cid,
         }
+        if not file_path or not os.path.isfile(file_path):
+            logger.error("[pre-upload] file_path invalid: %r folder=%s contents=%s",
+                         file_path, folder, os.listdir(folder))
+            raise Exception(t(cid, 'file_not_found_err'))
         smart_dest(file_path, msg, dest, folder_name=safe_title, task_info=task_info)
         # If smart_dest stashed this file (Drive not connected — user will
         # re-pick a destination), the file must survive cleanup.
@@ -463,6 +557,8 @@ def process_playlist_download(task):
             'quiet':               True,
             'no_warnings':         True,
             'js_runtimes':         {'deno': {}, 'node': {}},
+            **({'proxy': os.environ['YT_PROXY'].strip()}
+               if os.environ.get('YT_PROXY', '').strip() else {}),
             'windowsfilenames':    True,
             'concurrent_fragment_downloads': 4,
             'throttledratelimit':           100000,

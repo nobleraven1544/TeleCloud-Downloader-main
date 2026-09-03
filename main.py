@@ -20,35 +20,40 @@ _shutdown_requested = threading.Event()
 
 def _configure_bot_commands():
     """
-    Configure Telegram command menus with scopes:
-    - Default scope: safe public commands only
-    - Admin chat scope: includes admin-only commands
+    Configure Telegram command menus with scopes.
+    Wrapped in try/except because set_my_commands can fail if the token
+    is not yet valid or the local bot-api is still warming up — we don't
+    want that to crash the whole bot.
     """
-    public_commands = [
-        types.BotCommand('start', 'Start bot / Open main menu'),
-    ]
+    try:
+        public_commands = [
+            types.BotCommand('start', 'Start bot / Open main menu'),
+        ]
 
-    admin_commands = [
-        types.BotCommand('adduser', 'Approve user: /adduser <id>'),
-        types.BotCommand('deluser', 'Disable user: /deluser <id>'),
-        types.BotCommand('setquota', 'Set quota: /setquota <id> <files> <GB>'),
-        types.BotCommand('users', 'Manage users panel: /users'),
-        types.BotCommand('togglereg', 'Toggle self-registration'),
-        types.BotCommand('broadcast', 'Broadcast: /broadcast <message>'),
-    ]
+        admin_commands = [
+            types.BotCommand('adduser', 'Approve user: /adduser <id>'),
+            types.BotCommand('deluser', 'Disable user: /deluser <id>'),
+            types.BotCommand('setquota', 'Set quota: /setquota <id> <files> <GB>'),
+            types.BotCommand('users', 'Manage users panel: /users'),
+            types.BotCommand('togglereg', 'Toggle self-registration'),
+            types.BotCommand('setgithub', 'Set GitHub token: /setgithub <TOKEN> <owner/repo>'),
+            types.BotCommand('broadcast', 'Broadcast: /broadcast <message>'),
+        ]
 
-    # Everyone sees only public commands.
-    bot.set_my_commands(
-        public_commands,
-        scope=types.BotCommandScopeDefault(),
-    )
-
-    # The admin sees both public + admin commands in their own chat menu.
-    if ADMIN_ID > 0:
+        # Everyone sees only public commands.
         bot.set_my_commands(
-            public_commands + admin_commands,
-            scope=types.BotCommandScopeChat(ADMIN_ID),
+            public_commands,
+            scope=types.BotCommandScopeDefault(),
         )
+
+        # The admin sees both public + admin commands in their own chat menu.
+        if ADMIN_ID > 0:
+            bot.set_my_commands(
+                public_commands + admin_commands,
+                scope=types.BotCommandScopeChat(ADMIN_ID),
+            )
+    except Exception as e:
+        logger.warning("set_my_commands failed (non-fatal): %s", e)
 
 
 def _request_shutdown(signum=None, frame=None):
@@ -81,7 +86,6 @@ def main():
     _register_signal_handlers()
     start_worker()
     try:
-        bot.remove_webhook()
         _configure_bot_commands()
         logger.info("Bot is running")
 

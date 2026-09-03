@@ -7,6 +7,8 @@ from collections import OrderedDict
 # Paths and constants
 # =============================================================
 TOKEN           = os.environ.get('DOWNLOADER_BOT_TOKEN')
+TELEGRAM_API_ID = os.environ.get('TELEGRAM_API_ID', '0')
+TELEGRAM_API_HASH = os.environ.get('TELEGRAM_API_HASH', '')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '')
 DOWNLOAD_DIR    = '/root/downloads'
 COOKIES_DIR     = '/root/cookies'
@@ -15,10 +17,46 @@ USER_LANGS_FILE = '/app/user_configs/user_langs.json'
 USER_CONFIGS_DIR = '/app/user_configs'
 
 # =============================================================
+# PostgreSQL (user storage — replaces local SQLite to save disk)
+# =============================================================
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+# =============================================================
+# GitHub per-user upload (each user sets their own token)
+# =============================================================
+GITHUB_DEFAULT_REPO = os.environ.get('GITHUB_DEFAULT_REPO', '')  # owner/repo fallback
+
+# =============================================================
+# AWS S3 / Railway Bucket (injected automatically by Railway)
+# Railway uses bare names (ACCESS_KEY_ID, BUCKET, ENDPOINT);
+# we also accept AWS_-prefixed names for portability.
+# =============================================================
+AWS_ACCESS_KEY_ID     = os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY') or os.environ.get('ACCESS_KEY_SECRET')
+AWS_BUCKET_NAME       = (os.environ.get('AWS_BUCKET_NAME')
+                         or os.environ.get('BUCKET')
+                         or os.environ.get('RAILWAY_BUCKET_NAME'))
+AWS_ENDPOINT_URL      = os.environ.get('AWS_ENDPOINT_URL') or os.environ.get('ENDPOINT')
+AWS_DEFAULT_REGION    = (os.environ.get('AWS_DEFAULT_REGION')
+                         or os.environ.get('REGION', 'auto'))
+RAILWAY_PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+
+# Local file storage for S3 fallback / Railway Volume
+UPLOAD_VOLUME = '/root/storage'
+os.makedirs(UPLOAD_VOLUME, exist_ok=True)
+
+# =============================================================
 # Multi-tenant admin & registration settings
 # =============================================================
 # The single Telegram user_id that has full admin privileges.
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
+
+# Default upload destination is Telegram (2GB via Local Bot API).
+# Users start in tg_upload_mode; they can switch to Drive from the menu.
+gdrive_redirects = {}  # cid -> {fp, folder_name, task_info} when gd chosen w/o Drive
+tg_upload_mode = set()
+if ADMIN_ID > 0:
+    tg_upload_mode.add(ADMIN_ID)
 
 # When True, any user who sends /start can self-register.
 # When False, users must request access and wait for admin approval.
@@ -49,8 +87,8 @@ MAX_CONCURRENT_DOWNLOADS = int(os.environ.get('MAX_CONCURRENT_DOWNLOADS', '2'))
 # Per-user runtime state
 # =============================================================
 user_state       = {}
-tg_upload_mode   = set()
-gd_upload_mode   = set()
+# pending file uploads awaiting destination pick: cid -> {'fp':..., 'status_msg_id':...}
+pending_uploads  = {}
 
 # Default quality per user (video only)
 # Possible values: 'manual', 'best', '1080', '720', '480'
@@ -66,6 +104,7 @@ user_download_mode = {}
 # Video container format (when media == video)
 # Possible values: 'mp4', 'mkv', 'default'
 user_video_format = {}
+pending_github_setup = {}  # cid → True (GitHub connect flow started)
 
 # Audio codec (when media == audio)
 # Possible values: 'mp3', 'm4a', 'flac', 'default'
@@ -105,11 +144,20 @@ cache_lock = threading.Lock()
 # Shared objects
 # =============================================================
 import telebot.apihelper as apihelper
-TELEGRAM_LOCAL = os.environ.get('TELEGRAM_LOCAL', '1').strip().lower() in ('1', 'true', 'yes', 'on')
-if TELEGRAM_LOCAL:
-    apihelper.API_URL = "http://localhost:8081/bot{0}/{1}"
-    apihelper.FILE_URL = "http://localhost:8081"
+# Always use Local Bot API Server for uploads (2GB support)
+# This is a downloader bot — local mode is required.
+apihelper.API_URL = "http://localhost:8081/bot{0}/{1}"
+apihelper.FILE_URL = "http://localhost:8081"
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
+# Wrap answer_callback_query so an expired/invalid query id (user clicks an
+# old button after a restart) never crashes the whole callback handler.
+_orig_answer = bot.answer_callback_query
+def _safe_answer(call_id, *a, **k):
+    try:
+        return _orig_answer(call_id, *a, **k)
+    except Exception:
+        return None
+bot.answer_callback_query = _safe_answer
 # Set explicit timeouts for all short API calls (edit, send_message, etc.).
 # Large-file uploads override this per-call via timeout=upload_timeout in
 # uploaders/telegram_upload.py, so these values only affect small payloads.
@@ -122,11 +170,6 @@ queue_lock     = threading.Lock()
 # Protected by current_tasks_lock for thread-safe reads/writes from any thread.
 current_tasks      = {}                # type: dict[int, dict]
 current_tasks_lock = threading.Lock()
-
-# pending_uploads: tracks in-progress upload tasks per chat
-pending_uploads    = {}                # type: dict[int, dict]
-# gdrive_redirects: tracks Google Drive redirect state per chat
-gdrive_redirects   = {}                # type: dict[int, dict]
 
 # stop_event: used exclusively for rclone upload cancellation.
 # Per-download cancellation is handled via task['_stop'] (a threading.Event

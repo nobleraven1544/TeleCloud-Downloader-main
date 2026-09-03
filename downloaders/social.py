@@ -9,6 +9,13 @@ from config import bot, DOWNLOAD_DIR, ADMIN_ID
 from cookies import active_cookies_file
 from utils import check_disk_space, get_free_space, cleanup_path, build_rich_progress_card, friendly_error, safe_tg_call
 from uploaders.smart_dest import smart_dest
+
+
+def _apply_proxy(opts: dict) -> dict:
+    _px = os.environ.get('YT_PROXY', '').strip()
+    if _px and 'proxy' not in opts:
+        opts['proxy'] = _px
+    return opts
 # _url_is_playlist is defined in handlers alongside the other social-link helpers.
 # Import lazily inside the function to avoid a circular-import at module load time.
 
@@ -22,7 +29,7 @@ def _cancel_markup(cid=None):
 
 def _is_ytdlp_url(url: str) -> bool:
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'js_runtimes': {'deno': {}, 'node': {}}}) as ydl:
+        with yt_dlp.YoutubeDL(_apply_proxy({'quiet': True, 'js_runtimes': {'deno': {}, 'node': {}}})) as ydl:
             for ie_cls in ydl._ies.values():
                 try:
                     if ie_cls.suitable(url) and ie_cls.IE_NAME not in ('generic', 'Generic'):
@@ -127,12 +134,15 @@ def ytdlp_universal(task):
     if embed_chapters and not audio_only:
         ydl_opts['embedchapters'] = True
     if cf: ydl_opts['cookiefile'] = cf
+    _apply_proxy(ydl_opts)
 
 
     fp = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info      = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception(t(cid, 'file_not_found_err'))
             expected  = ydl.prepare_filename(info)
             base      = os.path.splitext(expected)[0]
             candidates = glob.glob(base + '.*')
@@ -261,10 +271,10 @@ def process_soundcloud_playlist(task):
 
     # ── 1. Fetch playlist entries with extract_flat ───────────
     cf = active_cookies_file(url, cid)
+    fetch_opts = {'extract_flat': True, 'quiet': True}
+    _apply_proxy(fetch_opts)
     if cf:
         fetch_opts['cookiefile'] = cf
-    if _px:
-        fetch_opts['proxy'] = _px
 
     msg = bot.send_message(chat_id, t(cid, 'sc_fetching_playlist'),
                            reply_markup=_cancel_markup(cid))
@@ -335,6 +345,7 @@ def process_soundcloud_playlist(task):
             'postprocessors':      postprocessors,
             'writethumbnail':      True,
         }
+        _apply_proxy(ydl_opts)
         if cf:
             ydl_opts['cookiefile'] = cf
 

@@ -493,21 +493,6 @@ STRINGS = {
         'fa': "🔢 منتظر در صف ({count} مورد):",
         'en': "🔢 Waiting in queue ({count} items):",
     },
-    'merge_send_files': {
-        'fa': ("🧩 پارت‌ها را به ترتیب بفرست (part001، part002، ...)\n"
-               "بعد از آخرین پارت، «🔗 اتصال و ساخت فایل کامل» را بزن."),
-        'en': ("🧩 Send the parts in order (part001, part002, ...)\n"
-               "When done, tap '🔗 Merge into full file'."),
-    },
-    'merge_part_saved': {
-        'fa': "✅ پارت {n} ذخیره شد: {name}\nپارت بعدی را بفرست یا اتصال را بزن.",
-        'en': "✅ Part {n} saved: {name}\nSend the next part or tap merge.",
-    },
-    'downloading_part': {
-        'fa': "⬇️ در حال دریافت پارت {n}...",
-        'en': "⬇️ Receiving part {n}...",
-    },
-
     'queue_unknown': {
         'fa': "نامشخص",
         'en': "Unknown",
@@ -592,6 +577,11 @@ STRINGS = {
         'fa': "❓ لینک معتبر نیست.",
         'en': "❓ Invalid link.",
     },
+    'send_link_hint': {
+        'fa': "لینکی (YouTube، اینستاگرام، دایرکت، مگنت) بفرستید تا دانلودش کنم. برای راهنما دکمه ℹ️ راهنما را بزنید.",
+        'en': "Send a link (YouTube, Instagram, Direct, Magnet) and I'll download it. Tap ℹ️ Help for guidance.",
+    },
+
     'unknown_link': {
         'fa': "❓ لینک شناخته‌شده‌ای نیست.",
         'en': "❓ Unrecognized link.",

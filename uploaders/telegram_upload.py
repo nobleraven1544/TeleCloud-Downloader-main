@@ -1,4 +1,5 @@
 import os
+import time
 from config import bot
 from utils import fmt_size, cleanup_path, friendly_error, safe_tg_call
 from uploaders.gdrive_upload import upload_to_gdrive_cancellable
@@ -85,7 +86,26 @@ def upload_file_to_telegram(file_path: str, status_msg, task_info=None):
             source = (task_info or {}).get('source', '')
             caption = f"{name}\n🔗 از {source}" if source else name
             if ext in ('.mp4', '.mkv', '.avi', '.mov', '.webm'):
-                bot.send_video(chat_id, f, caption=caption, timeout=upload_timeout)
+                # Generate a preview thumbnail with ffmpeg so the media shows
+                # a real frame instead of a generic/blank preview.
+                thumb_path = None
+                try:
+                    import subprocess as _sp, tempfile as _tf
+                    _t = os.path.join(_tf.gettempdir(), f"thumb_{os.getpid()}_{int(time.time())}.jpg")
+                    r = _sp.run(['ffmpeg', '-y', '-ss', '3', '-i', file_path,
+                                 '-frames:v', '1', '-vf', 'scale=320:-2', _t],
+                                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=60)
+                    if r.returncode == 0 and os.path.getsize(_t) > 0:
+                        thumb_path = _t
+                except Exception:
+                    thumb_path = None
+                # supports_streaming lets Telegram play the video inline
+                # (progressive watch) instead of requiring a full download.
+                kwargs = {'caption': caption, 'supports_streaming': True,
+                          'timeout': upload_timeout}
+                if thumb_path:
+                    kwargs['thumbnail'] = open(thumb_path, 'rb')
+                bot.send_video(chat_id, f, **kwargs)
             elif ext in _AUDIO_EXTS:
                 audio_title, performer = _audio_metadata_for_telegram(file_path, task_info, name)
                 kwargs = {'caption': caption, 'timeout': upload_timeout}
@@ -153,101 +173,3 @@ def upload_folder_to_telegram(folder_path: str, status_msg, task_info=None):
         # upload_file_to_telegram's own cleanup_path(file_path) call, so this
         # is primarily a safety net for the directory entry and unprocessed files.
         cleanup_path(folder_path)
-
-
-def send_split_parts(file_path: str, status_msg, task_info=None, part_mb: int = 40):
-    """Split a large file into part_mb chunks and send each as a document.
-    Parts are named <name>.part001, .part002 ... so the in-bot merge feature
-    (🧩 چسباندن پارت‌ها) can reassemble them later."""
-    import os
-    import time
-    from config import bot
-    from utils import fmt_size, safe_tg_call
-
-    chat_id = status_msg.chat.id
-    cid     = chat_id
-    if task_info is None:
-        task_info = {}
-
-    size      = os.path.getsize(file_path)
-    part_size = part_mb * 1024 * 1024
-    n_parts   = (size + part_size - 1) // part_size
-    name      = os.path.basename(file_path)
-
-    try:
-        safe_tg_call(bot.edit_message_text,
-                     f"✂️ تقسیم {name} ({fmt_size(size)}) به {n_parts} پارت...",
-                     chat_id, status_msg.message_id)
-    except Exception:
-        pass
-
-    sent = 0
-    with open(file_path, 'rb') as f:
-        i = 0
-        while True:
-            chunk = f.read(part_size)
-            if not chunk:
-                break
-            i += 1
-            part_name = f"{name}.part{i:03d}"
-            from telebot.apihelper import ApiTelegramException
-            bot.send_document(chat_id, chunk, visible_file_name=part_name,
-                              caption=f"📦 {part_name} ({i}/{n_parts})",
-                              timeout=max(300, len(chunk) // (1024 * 1024) + 120))
-            sent = i
-            try:
-                safe_tg_call(bot.edit_message_text,
-                             f"✂️ ارسال پارت {i}/{n_parts} از {name}",
-                             chat_id, status_msg.message_id)
-            except Exception:
-                pass
-
-    from utils import cleanup_path
-    cleanup_path(file_path)
-    try:
-        safe_tg_call(bot.edit_message_text,
-                     f"✅ {sent} پارت از {name} ارسال شد.\n"
-                     "برای چسباندن پارت‌ها در ربات: منو ← 🧩 چسباندن پارت‌ها",
-                     chat_id, status_msg.message_id)
-    except Exception:
-        pass
-
-
-def merge_parts(parts: list, out_path: str, status_msg) -> bool:
-    """Concatenate ordered part files into out_path with progress updates."""
-    import os
-    import time
-    from config import bot
-    from utils import fmt_size, safe_tg_call
-
-    total   = sum(os.path.getsize(p) for p in parts)
-    done    = 0
-    last    = [0.0]
-    t0      = time.time()
-
-    with open(out_path, 'wb') as out:
-        for idx, p in enumerate(parts, 1):
-            with open(p, 'rb') as f:
-                while True:
-                    chunk = f.read(4 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    done += len(chunk)
-                    now = time.time()
-                    if now - last[0] > 3 or done >= total:
-                        last[0] = now
-                        pct = done / total * 100 if total else 100
-                        elapsed = max(now - t0, 0.001)
-                        speed = done / elapsed
-                        eta = int((total - done) / speed) if speed else 0
-                        try:
-                            safe_tg_call(bot.edit_message_text,
-                                         f"🧩 چسباندن پارت {idx}/{len(parts)}\n"
-                                         f"[{'▓'*int(pct//5)}{'░'*(20-int(pct//5))}] {pct:.0f}%\n"
-                                         f"📦 {fmt_size(done)} / {fmt_size(total)} • "
-                                         f"⏱ ~{eta}s",
-                                         status_msg.chat.id, status_msg.message_id)
-                        except Exception:
-                            pass
-    return True

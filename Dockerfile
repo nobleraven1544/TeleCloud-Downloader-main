@@ -12,6 +12,5 @@ RUN apk add --no-cache aria2 curl unzip nodejs ffmpeg && \
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY . /app/
 CMD ["python3", "main.py"]
 RUN mkdir -p /root/.config/yt-dlp && echo '--js-runtimes node' > /root/.config/yt-dlp/config

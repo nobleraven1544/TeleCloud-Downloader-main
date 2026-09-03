@@ -86,29 +86,11 @@ def make_progress_bar(percent: float, width: int = 20) -> str:
     filled = int(percent / 100 * width)
     return "▓" * filled + "░" * (width - filled)
 
-def fmt_elapsed(seconds: float) -> str:
-    """Format elapsed seconds as 1h 02m 03s style."""
-    try:
-        s = max(0, int(seconds))
-    except (TypeError, ValueError):
-        return "-"
-    h, rem = divmod(s, 3600)
-    m, sec = divmod(rem, 60)
-    if h:
-        return f"{h}h {m:02d}m {sec:02d}s"
-    if m:
-        return f"{m}m {sec:02d}s"
-    return f"{sec}s"
-
-
 def build_rich_progress_card(status_icon: str, title: str, percent: float,
                              downloaded, total, speed, eta, source: str,
-                             quality: str, cid=None, started_at: float = None) -> str:
-    """Build a professional progress card.
-    When started_at (time.time() epoch) is given, the card also shows the
-    elapsed time alongside the ETA."""
+                             quality: str, cid=None) -> str:
+    """Build a professional progress card."""
     from locales import t as _t
-    import time as _time
     # Truncate title to 35 characters
     safe_title = title if title else _t(cid, 'progress_title_unknown') if cid else "Unknown"
     tl = safe_title[:32] + "..." if len(safe_title) > 35 else safe_title
@@ -118,11 +100,6 @@ def build_rich_progress_card(status_icon: str, title: str, percent: float,
     dl_str  = fmt_size(downloaded)
     tot_str = fmt_size(total)
     spd_str = fmt_speed(speed)
-
-    # Elapsed time
-    elapsed_str = ""
-    if started_at is not None:
-        elapsed_str = f" • ⏳ {fmt_elapsed(_time.time() - started_at)}"
 
     # ETA formatting
     if isinstance(eta, (int, float)) and eta > 0:
@@ -138,7 +115,7 @@ def build_rich_progress_card(status_icon: str, title: str, percent: float,
         f"{bar} {percent:.0f}%\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 {dl_str} / {tot_str} • ⚡ {spd_str}\n"
-        f"⏱ {eta_str}{elapsed_str} • 🌐 {source}{quality_label}"
+        f"⏱ {eta_str} • 🌐 {source}{quality_label}"
     )
 
 # =============================================================
@@ -147,16 +124,15 @@ def build_rich_progress_card(status_icon: str, title: str, percent: float,
 def friendly_error(err: str, get_free_space_fn=None, cid=None) -> str:
     from locales import t as _t
     e = str(err).lower()
-    if 'sign in to confirm' in e or ('not a bot' in e):
+    # Only claim "login required" when the error actually points to auth,
+    # not for any 403/private mention (YouTube uses those for rate-limits
+    # and unavailable videos even with valid cookies).
+    if ('sign in' in e or 'log in to view' in e or 'login required' in e
+            or 'confirm you' in e or ('age' in e and 'restricted' in e)):
         return _t(cid, 'err_login_fresh') if cid else (
-            "\U0001F512 یوتیوب میگه لاگین لازمه.\n"
-            "\u27A1\uFE0F از منوی \U0001F36A مدیریت کوکی، کوکی تازهٔ یوتیوب بفرست "
-            "(افزونهٔ «Get cookies.txt LOCALLY» در کروم، با اکانت لاگین‌شده Export کن و اسمش رو youtube بذار).\n"
-            "\U0001F4A1 کوکی قدیمی/منقضی هم همین خطا میده — پاکش کن و جدید بفرست.")
-    if any(k in e for k in ['login', 'sign in', '403', 'age', 'cookie', 'private']):
-        return _t(cid, 'err_login') if cid else (
-            "🔒 محتوا نیاز به لاگین دارد.\n"
-            "➡️ از منوی 🍪 مدیریت کوکی، کوکی سایت را اضافه کنید.")
+            "🔒 یوتیوب میگه لاگین لازمه.\n"
+            "➡️ کوکی تازه بگیر: از مرورگر لاگین کن → cookies.txt خروجی بگیر → از منوی 🍪 بفرست.\n"
+            "💡 کوکی قدیمی/منقضی هم همین خطا رو میده — اگه قبلاً کوکی دادی، پاکش کن و جدید بفرست.")
     if '404' in e or 'not found' in e:
         return _t(cid, 'err_404') if cid else (
             "🔗 لینک پیدا نشد (404).\n"
@@ -174,6 +150,12 @@ def friendly_error(err: str, get_free_space_fn=None, cid=None) -> str:
         free = get_free_space_fn() if get_free_space_fn else get_free_space()
         return (_t(cid, 'err_disk', free=free) if cid else
                 f"💾 فضای دیسک کافی نیست! آزاد: {free}\n➡️ لطفاً با ادمین تماس بگیرید.")
+    if 'unable to download video data' in e and '403' in e:
+        # YouTube throttling/PO-token issue — cookie alone doesn't fix it.
+        return (_t(cid, 'err_yt_403') if cid else
+                "🚫 یوتیوب دانلود این ویدیو رو مسدود کرده (403).\n"
+                "➡️ چند دقیقه بعد دوباره امتحان کن یا کیفیت دیگه‌ای انتخاب کن.\n"
+                "💡 اگه تکرار شد، کوکی تازهٔ یوتیوب اضافه کن.")
     if 'unsupported' in e or 'no extractor' in e:
         return _t(cid, 'err_unsupported') if cid else (
             "🚫 این سایت پشتیبانی نمیشود.\n"

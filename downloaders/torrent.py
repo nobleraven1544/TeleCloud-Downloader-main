@@ -99,7 +99,7 @@ def _do_torrent_download(task, msg):
     from config import tg_upload_mode
     chat_id = task['chat_id']
     cid     = chat_id
-    dest    = task.get('dest')  # no silent Drive fallback — caller must decide
+    dest    = task.get('dest') or 'tg'
     TIMEOUT = 20 * 60
     task['_active_path'] = None
     session_dir = os.path.join(DOWNLOAD_DIR, f".torrent_{chat_id}_{int(time.time())}_{os.getpid()}")
@@ -124,7 +124,6 @@ def _do_torrent_download(task, msg):
                                               stderr=subprocess.STDOUT, text=True, bufsize=1)
         last_update        = time.time()
         last_progress_time = time.time()
-        torrent_start      = time.time()
         last_percent       = -1
         output_lines       = []
         pi                 = {"percent": 0.0, "speed": 0.0, "peers": 0, "eta": 0,
@@ -197,8 +196,7 @@ def _do_torrent_download(task, msg):
                     card = build_rich_progress_card(
                         "🧲", t(cid, 'torrent_downloading'),
                         pi["percent"], pi["dl_bytes"], pi["total_bytes"],
-                        pi["speed"], pi["eta"], source_label, "", cid=cid,
-                        started_at=torrent_start)
+                        pi["speed"], pi["eta"], source_label, "", cid=cid)
                     if timeout_warn:
                         card += timeout_warn
                     try:
@@ -229,17 +227,16 @@ def _do_torrent_download(task, msg):
         base_name = os.path.splitext(display_name)[0][:40]
         is_folder = os.path.isdir(newest)
 
-        if cid != ADMIN_ID:
-            if is_folder:
-                real_size = 0
-                for root, _, files in os.walk(newest):
-                    for name in files:
-                        fpath = os.path.join(root, name)
-                        if os.path.isfile(fpath):
-                            real_size += os.path.getsize(fpath)
-            else:
-                real_size = os.path.getsize(newest) if os.path.isfile(newest) else 0
-            db.record_download_bytes(cid, real_size)
+        if is_folder:
+            real_size = 0
+            for root, _, files in os.walk(newest):
+                for name in files:
+                    fpath = os.path.join(root, name)
+                    if os.path.isfile(fpath):
+                        real_size += os.path.getsize(fpath)
+        else:
+            real_size = os.path.getsize(newest) if os.path.isfile(newest) else 0
+        db.record_download_bytes(cid, real_size)
 
         try:
             safe_tg_call(bot.edit_message_text, t(cid, 'torrent_preparing_upload'), chat_id, msg.message_id)

@@ -132,29 +132,9 @@ def active_cookies_file(url: str = '', cid=None) -> str:
             for name in checks:
                 final_checks.extend(aliases.get(name, [name]))
 
-            def _find(prefix_match=False):
-                """Exact name first; then any saved cookie whose name contains
-                the site token (e.g. 'm_youtube_com_cookies__5_' matches youtube)."""
-                for name in final_checks:
-                    if cookie_exists(name, cid) and is_cookie_enabled(name, cid):
-                        return get_cookie_path(name, cid)
-                if prefix_match and cid is not None:
-                    try:
-                        for ck in list_cookies(cid):
-                            stem = ck['name'].lower()
-                            if not ck['enabled'] or ck['size'] == 0:
-                                continue
-                            for name in final_checks:
-                                toks = name.split('_')
-                                if all(t in stem for t in toks if t not in ('com',)):
-                                    return ck['path']
-                    except Exception:
-                        pass
-                return None
-
-            found = _find(prefix_match=True)
-            if found:
-                return found
+            for name in final_checks:
+                if cookie_exists(name, cid) and is_cookie_enabled(name, cid):
+                    return get_cookie_path(name, cid)
         except Exception:
             pass
 
