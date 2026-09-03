@@ -12,5 +12,7 @@ RUN apk add --no-cache aria2 curl unzip nodejs ffmpeg && \
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-CMD ["python3", "main.py"]
+COPY . /app/
+RUN chmod +x /app/start_railway.sh
 RUN mkdir -p /root/.config/yt-dlp && echo '--js-runtimes node' > /root/.config/yt-dlp/config
+CMD ["/app/start_railway.sh"]
