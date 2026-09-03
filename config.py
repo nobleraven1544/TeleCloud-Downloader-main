@@ -123,6 +123,11 @@ queue_lock     = threading.Lock()
 current_tasks      = {}                # type: dict[int, dict]
 current_tasks_lock = threading.Lock()
 
+# pending_uploads: tracks in-progress upload tasks per chat
+pending_uploads    = {}                # type: dict[int, dict]
+# gdrive_redirects: tracks Google Drive redirect state per chat
+gdrive_redirects   = {}                # type: dict[int, dict]
+
 # stop_event: used exclusively for rclone upload cancellation.
 # Per-download cancellation is handled via task['_stop'] (a threading.Event
 # injected into each task by downloader_queue before dispatch).
