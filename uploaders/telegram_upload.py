@@ -1,10 +1,13 @@
 import os
 import time
+import subprocess
+import tempfile
 from config import bot
 from utils import fmt_size, cleanup_path, friendly_error, safe_tg_call
 from uploaders.gdrive_upload import upload_to_gdrive_cancellable
 
 _AUDIO_EXTS = ('.mp3', '.m4a', '.ogg', '.flac', '.wav')
+_TELEGRAM_MAX = 48 * 1024 * 1024  # 48MB safe limit (Bot API = 50MB)
 
 
 def _clean_audio_meta(value, limit=64):
@@ -36,6 +39,82 @@ def _audio_metadata_for_telegram(file_path: str, task_info: dict, fallback_name:
     )
 
 
+def _upload_split(file_path: str, status_msg, task_info=None):
+    """Split a large file into <=48MB chunks and upload each as a document."""
+    from locales import t
+    chat_id = status_msg.chat.id
+    cid     = chat_id
+    name    = os.path.basename(file_path)
+    total   = os.path.getsize(file_path)
+    chunk_n = (total // _TELEGRAM_MAX) + 1
+    base, ext = os.path.splitext(name)
+    tmp_dir   = tempfile.mkdtemp(prefix="split_")
+
+    try:
+        # Use ffmpeg for video/audio split (preserves playback), binary split for others
+        video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv')
+        audio_exts = ('.mp3', '.m4a', '.ogg', '.flac', '.wav')
+        is_media = ext.lower() in video_exts + audio_exts
+
+        if is_media:
+            # Calculate duration-based split points
+            dur_r = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', file_path],
+                capture_output=True, text=True, timeout=30)
+            total_dur = float(dur_r.stdout.strip()) if dur_r.returncode == 0 else 0
+            part_dur  = total_dur / chunk_n if total_dur else 0
+
+            for i in range(chunk_n):
+                part_name = f"{base}_part{i+1:02d}{ext}"
+                part_path = os.path.join(tmp_dir, part_name)
+                start = i * part_dur
+                cmd = ['ffmpeg', '-y', '-ss', str(start), '-i', file_path,
+                       '-t', str(part_dur), '-c', 'copy', '-avoid_negative_ts', 'make_zero', part_path]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        else:
+            # Binary split for non-media files
+            with open(file_path, 'rb') as src:
+                for i in range(chunk_n):
+                    part_name = f"{base}_part{i+1:02d}{ext}"
+                    part_path = os.path.join(tmp_dir, part_name)
+                    chunk = src.read(_TELEGRAM_MAX)
+                    if chunk:
+                        with open(part_path, 'wb') as dst:
+                            dst.write(chunk)
+
+        parts = sorted([os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+                        if os.path.isfile(os.path.join(tmp_dir, f))])
+
+        _stop = task_info.get('_stop') if task_info else None
+        for i, part in enumerate(parts, 1):
+            if _stop and _stop.is_set():
+                break
+            part_size = fmt_size(os.path.getsize(part))
+            part_name = os.path.basename(part)
+            sub = bot.send_message(chat_id,
+                                   f"📦 {i}/{len(parts)}: {part_name} ({part_size})")
+            try:
+                with open(part, 'rb') as f:
+                    bot.send_document(chat_id, f,
+                                      caption=f"{part_name} [{i}/{len(parts)}]",
+                                      timeout=600)
+            except Exception as e:
+                bot.send_message(chat_id, f"❌ {i}/{len(parts)}: {friendly_error(str(e), cid=cid)}")
+
+        # Final message
+        final = f"✅ ارسال {len(parts)} پارت از {name} ({fmt_size(total)}) تمام شد"
+        try:
+            safe_tg_call(bot.edit_message_text, final, chat_id, status_msg.message_id)
+        except Exception:
+            bot.send_message(chat_id, final)
+
+        cleanup_path(file_path)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def upload_file_to_telegram(file_path: str, status_msg, task_info=None):
     from locales import t
     if task_info is None:
@@ -65,6 +144,17 @@ def upload_file_to_telegram(file_path: str, status_msg, task_info=None):
             task_info=task_info,
             user_id=task_info.get('user_id'),
         )
+        return
+
+    # Files between 50MB and 2GB: split into chunks for Telegram Bot API
+    if os.path.getsize(file_path) > _TELEGRAM_MAX:
+        try:
+            safe_tg_call(bot.edit_message_text,
+                         t(cid, 'tg_uploading') + f" (split {size_mb:.0f}MB)",
+                         chat_id, status_msg.message_id)
+        except Exception:
+            pass
+        _upload_split(file_path, status_msg, task_info)
         return
 
     try:
