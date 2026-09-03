@@ -948,6 +948,10 @@ def _handle_youtube_link(message, cid, text):
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(text, download=False)
 
+        if not info:
+            bot.edit_message_text(t(cid, 'unknown_link'), cid, msg.message_id)
+            return
+
         unknown = t(cid, 'unknown_title')
 
         if 'entries' in info:
@@ -1165,6 +1169,13 @@ def _handle_soundcloud_playlist(message, cid, text):
             pass
         return
 
+    if not info:
+        try:
+            bot.edit_message_text(t(cid, 'unknown_link'), cid, msg.message_id)
+        except Exception:
+            pass
+        return
+
     title   = info.get('title', 'SoundCloud Playlist')
     entries = list(info.get('entries', []))
     count   = len(entries)
@@ -1346,6 +1357,9 @@ def _handle_social_link(message, cid, text):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(text, download=False)
+            if not info:
+                bot.reply_to(message, t(cid, 'unknown_link'))
+                return
             title   = info.get('title', domain)[:40]
             formats = info.get('formats', [])
             seen_h     = set()
