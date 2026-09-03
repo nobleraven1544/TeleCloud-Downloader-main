@@ -22,7 +22,7 @@ from dest_helpers import (get_dest, should_ask_dest, get_quality,
                           get_quality_label, is_audio_mode, get_audio_mode_label,
                           get_audio_format, get_audio_quality, get_video_format,
                           get_subtitle, get_chapters)
-from downloaders.youtube import get_format_sizes, _yt_proxy as _handlers_yt_proxy
+from downloaders.youtube import get_format_sizes, _yt_proxy as _handlers_yt_proxy, _yt_client_args
 from uploaders.gdrive_upload import upload_file_to_gdrive_folder
 from downloaders.social import _is_ytdlp_url
 from locales import t
@@ -942,6 +942,8 @@ def _handle_youtube_link(message, cid, text):
         opts['cookiefile'] = cf
     _px = _handlers_yt_proxy()
     if _px: opts['proxy'] = _px
+    _ea = _yt_client_args(cf)
+    if _ea: opts['extractor_args'] = _ea
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(text, download=False)

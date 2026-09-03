@@ -16,6 +16,23 @@ from utils import (check_disk_space, get_free_space, cleanup_path,
                    fmt_size, build_rich_progress_card, friendly_error, safe_tg_call)
 from uploaders.smart_dest import smart_dest
 
+
+def _yt_proxy():
+    """Optional egress proxy for YouTube. Set YT_PROXY env (http://user:pass@host:port).
+    Empty value, 'off' or 'none' disables the proxy entirely."""
+    v = (os.environ.get('YT_PROXY') or '').strip()
+    if not v or v.lower() in ('off', 'none', 'disabled', '0', 'false'):
+        return None
+    return v
+
+
+def _yt_client_args(cf):
+    """Extractor args for YouTube depending on cookie availability."""
+    if cf:
+        return {'youtube': {'player_client': ['tv_simply', 'web_safari', 'mweb']}}
+    return {'youtube': {'player_client': ['tv_simply']}}
+
+
 def _cancel_markup(cid=None):
     from telebot import types
     from locales import t
